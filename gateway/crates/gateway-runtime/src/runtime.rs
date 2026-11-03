@@ -40,36 +40,12 @@ use gateway_proxy::{ProxyClient, ProxyOptions};
 use gateway_routing::RouteTable;
 use gateway_upstream::UpstreamRegistry;
 
-use bytes::Bytes;
 use http::{Request, Response, StatusCode};
-use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
-// ---------------------------------------------------------------------------
-// Body 类型别名
-// ---------------------------------------------------------------------------
-
-/// Phase 1 统一使用的响应体类型：`Full<Bytes>`。
-///
-/// # 为什么不直接用 Incoming？
-///
-/// `Incoming` 是 hyper server 端特有的 body 类型，代表从 socket 读的请求体/响应体。
-/// 它不能在业务代码里"构造"——它只能从 hyper 内部的连接获得。
-///
-/// # 为什么 Phase 1 用 Full<Bytes>？
-///
-/// - 成功路径：把上游返回的 `Incoming` body **完全收集**（`.collect().await`），
-///   然后用 `Full::new(bytes)` 构造响应。牺牲了流式转发的优势，但代码简单。
-/// - 错误路径：直接用 `Full::new(Bytes::from(json_string))` 构造 JSON 错误 body。
-///
-/// # Phase 2 改进计划
-///
-/// Phase 2 引入 `http_body_util::EitherBody<Incoming, Full<Bytes>>` 或
-/// `tower_http::body::BoxBody` 做类型擦除，让成功路径恢复流式透传。
-/// 需要修改 gateway-network::serve 的泛型 ResBody。
-type ResBody = Full<Bytes>;
+use crate::body::{self, ResBody};
 
 // ---------------------------------------------------------------------------
 // Runtime 结构体
@@ -90,8 +66,15 @@ pub struct Runtime {
     config: GatewayConfig,
     /// 编译好的路由表：Host → 前缀树 → Route
     route_table: Arc<RouteTable>,
-    /// 上游注册表：ServiceId → Upstream（含健康端点列表）
+    /// 上游注册表：UpstreamId → Upstream（含健康端点列表）
     upstream_registry: Arc<UpstreamRegistry>,
+    /// Service → Upstream 的引用解析表。
+    ///
+    /// 配置模型是 Route → Service → Upstream 三级引用
+    /// （Route.service_id → Service.upstream_id），而 UpstreamRegistry
+    /// 以 upstream_id 为键。本表在启动时从 cfg.services 一次性构建，
+    /// 请求路径上只做一次 HashMap 查找，零分配（借用 &str 键）。
+    service_upstreams: Arc<std::collections::HashMap<String, String>>,
     /// 反向代理客户端：hyper Client 实例（连接池在 hyper 内部管理）
     proxy_client: Arc<ProxyClient>,
 }
@@ -157,10 +140,21 @@ impl Runtime {
             connect_timeout: Duration::from_secs(5),
         }));
 
+        // 构建 Service → Upstream 引用解析表。
+        // gateway_config::validate() 已保证 Service.upstream_id 指向存在的
+        // Upstream（引用完整性校验），所以这里不需要再校验目标存在性。
+        let service_upstreams = Arc::new(
+            cfg.services
+                .iter()
+                .map(|svc| (svc.id.clone(), svc.upstream_id.clone()))
+                .collect::<std::collections::HashMap<_, _>>(),
+        );
+
         Self {
             config: cfg,
             route_table,
             upstream_registry,
+            service_upstreams,
             proxy_client,
         }
     }
@@ -298,8 +292,9 @@ impl Runtime {
     ///
     /// # 返回类型
     /// 返回 `Result<http::Response<ResBody>, Infallible>`。
-    /// - `ResBody = Full<Bytes>`：统一用收集后的 Bytes 作为响应体
-    ///   Phase 2 会改进 EitherBody / BoxBody 恢复流式透传
+    /// - `ResBody = BoxBody<Bytes, BoxError>`（P2.0 起）：
+    ///   成功路径是上游 `Incoming` 的流式透传（零拷贝），
+    ///   错误路径是内存构造的 `Full<Bytes>` JSON，两者统一类型擦除
     /// - `Infallible`：gateway-network 期望 handler 永远不失败（框架层保证）
     ///
     /// # 处理流程
@@ -307,9 +302,10 @@ impl Runtime {
     /// 2. RouteTable::resolve → 匹配 Route / MethodNotAllowed / NoMatch
     /// 3. UpstreamRegistry::pick_endpoint → 选中实例（Round-Robin）
     /// 4. ProxyClient::forward → 流式转发到上游
-    /// 5. 上游返回后把 Incoming body 收集成 Bytes → 构造 Full<Bytes>
-    /// 6. 任何一步失败 → 构造 JSON 错误响应
-    /// 7. 记录 AccessLog（成功/失败路径都记录）
+    /// 5. 上游响应 Incoming body 经 `body::boxed()` 类型擦除后直接透传
+    /// 6. 任何一步失败 → `body::error_response()` 构造 JSON 错误响应
+    /// 7. 统一经 `body::observe()` 包装：AccessLog 在 body 流结束/断开时输出，
+    ///    保证 request_duration_ms 统计的是完整流式传输时间
     async fn handle_request(
         &self,
         request: Request<Incoming>,
@@ -324,11 +320,17 @@ impl Runtime {
         let request_id = RequestId::new();
         let mut ctx = gateway_core::RequestContext::new(request_id);
 
-        // 拆开请求 Parts（method/uri/headers） 和 Body
+        // 拆开请求 Parts（method/uri/headers/extensions） 和 Body
         let (parts, body) = request.into_parts();
         let method = parts.method.clone();
         let uri = parts.uri.clone();
         let headers = parts.headers.clone();
+
+        // 从 request extensions 提取客户端对端地址。
+        // gateway-network::serve 在 accept 连接后把 peer_addr（SocketAddr）
+        // 注入 extensions；SocketAddr 实现了 Copy，copied() 直接取值。
+        // 若注入缺失（如单元测试直接调用 handler），退化为 None。
+        let client_ip = parts.extensions.get::<SocketAddr>().copied();
 
         // 从 headers 里提取 host（路由匹配需要；HTTP/1.1 的 Host header
         // 是必需的，HTTP/2 的 :authority pseudo-header hyper 会自动转成 Host）
@@ -343,7 +345,7 @@ impl Runtime {
             path.clone(),
             query.clone(),
             headers.clone(),
-            None,
+            client_ip,
         );
 
         // -----------------------------------------------------------------
@@ -363,91 +365,94 @@ impl Runtime {
             gateway_routing::MatchResult::Matched(route) => {
                 ctx.set_route(route.clone());
 
-                // 从 UpstreamRegistry 选出一个健康实例（Round-Robin 算法）
-                match self.upstream_registry.pick_endpoint(&route.service_id).await {
-                    Ok(endpoint) => {
-                        ctx.set_endpoint(endpoint.clone());
-                        ctx.mark_upstream_start();
+                // Route → Service → Upstream 引用解析：
+                // Route 引用的是 service_id，而 UpstreamRegistry 以 upstream_id
+                // 为键，先查 service_upstreams 映射表拿到 upstream_id。
+                // validate() 已保证引用完整，查不到属于内部错误 → 500。
+                let upstream_id = self.service_upstreams.get(&route.service_id).cloned();
 
-                        // 构造转发请求：原 Parts + 原 Body
-                        // ProxyClient::forward 内部会重建真实上游 URI
-                        let upstream_req = http::Request::from_parts(parts, body);
-
-                        // 用 placeholder URI 先构造一个合法 Request，
-                        // ProxyClient::forward 内部会覆盖 URI 为真实上游地址
-                        let mut forwarded = upstream_req;
-                        *forwarded.uri_mut() = http::Uri::builder()
-                            .scheme("http")
-                            .authority("placeholder.invalid")
-                            .path_and_query("/")
-                            .build()
-                            .unwrap_or_else(|_| "http://placeholder/".parse().unwrap());
-
-                        match self.proxy_client.forward(forwarded, &endpoint, &path, None).await {
-                            // 上游返回任何 HTTP 响应（2xx/3xx/4xx/5xx）都算"代理成功"——
-                            // 我们只透传，不解释业务语义
-                            Ok(upstream_resp) => {
-                                let status = upstream_resp.status().as_u16();
-                                ctx.mark_upstream_headers();
-                                ctx.finish(status);
-
-                                // -----------------------------------------------------------------
-                                // Phase 1 简化：把上游 Incoming body **完全收集**成 Bytes
-                                // -----------------------------------------------------------------
-                                // hyper 的 Incoming body 不能外部构造（没有 pub empty/new），
-                                // 也不能直接塞到 Full<Bytes> 里。所以我们需要：
-                                //
-                                // 1. 拆开上游响应 → (ResponseParts, Incoming)
-                                // 2. 用 http_body_util::BodyExt::collect() 把 Incoming 全部读完
-                                //    → Collected<T>，然后 .to_bytes() 拿到 Bytes
-                                // 3. 用 Full::new(bytes) 重新构造响应 body
-                                //
-                                // BodyExt 来自 http-body-util crate：
-                                //   BodyExt::collect(self) -> impl Future<Output = Collected<Self>>
-                                //   Collected::to_bytes(self) -> Bytes
-                                let (resp_parts, incoming_body) = upstream_resp.into_parts();
-                                // .collect() 返回 Result<Collected<Bytes>, BodyError>，
-                                // 因为我们的 handler 返回 Infallible，不能传播错误。
-                                // 兜底：如果收集失败（上游中途断开），返回空 body。
-                                let collected = incoming_body.collect().await;
-                                let body_bytes = collected
-                                    .map(|c| c.to_bytes())
-                                    .unwrap_or_else(|_| Bytes::new());
-
-                                // 用 Response::from_parts 重建响应（body 换成 Full<Bytes>）
-                                let resp = Response::from_parts(resp_parts, Full::new(body_bytes));
-
-                                // AccessLog 记录（成功路径）
-                                gateway_observability::AccessLog::emit(&ctx);
-
-                                return Ok(resp);
-                            },
-                            // 上游连接失败 / 超时 → 502 / 504
-                            Err(gateway_err) => {
-                                ctx.finish_with_error(
-                                    gateway_err.code().as_str().to_string(),
-                                    gateway_err.to_string(),
-                                );
-                                (
-                                    gateway_err.code().to_http_status(),
-                                    gateway_err.code().as_str().to_string(),
-                                    gateway_err.to_string(),
-                                )
-                            },
-                        }
-                    },
-                    // 没有健康端点 → 503
-                    Err(_no_healthy) => {
-                        let msg = format!("upstream {} has no healthy endpoints", route.service_id);
+                match upstream_id {
+                    // Service → Upstream 映射缺失（配置内部错误）→ 500
+                    None => {
+                        let msg = format!(
+                            "service '{}' has no upstream mapping (config bug)",
+                            route.service_id
+                        );
                         ctx.finish_with_error(
-                            ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
+                            ErrorCode::GatewayInternalError.as_str().to_string(),
                             msg.clone(),
                         );
                         (
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            ErrorCode::GatewayInternalError.as_str().to_string(),
                             msg,
                         )
+                    },
+                    Some(upstream_id) => {
+                        // 从 UpstreamRegistry 选出一个健康实例（Round-Robin 算法）
+                        match self.upstream_registry.pick_endpoint(&upstream_id).await {
+                            Ok(endpoint) => {
+                                ctx.set_endpoint(endpoint.clone());
+                                ctx.mark_upstream_start();
+
+                                // 构造转发请求：原 Parts + 原 Body（流式，不收集）。
+                                // ProxyClient::forward 内部会把 URI 覆盖为真实上游地址，
+                                // 并注入 X-Forwarded-For 等代理链头
+                                let upstream_req = http::Request::from_parts(parts, body);
+
+                                match self
+                                    .proxy_client
+                                    .forward(upstream_req, &endpoint, &path, client_ip)
+                                    .await
+                                {
+                                    // 上游返回任何 HTTP 响应（2xx/3xx/4xx/5xx）都算"代理成功"——
+                                    // 我们只透传，不解释业务语义
+                                    Ok(upstream_resp) => {
+                                        let status = upstream_resp.status().as_u16();
+                                        // 记录"上游响应头到达"时间点
+                                        // （upstream_duration_ms 统计口径：发起上游请求 → 首包到达）
+                                        ctx.mark_upstream_headers();
+                                        // 状态码现在写入 ctx；request_end 由 ObservedBody
+                                        // 在 body 流结束/断开时写入，保证总耗时统计准确
+                                        ctx.status_code = Some(status);
+
+                                        // 流式透传（P2.0 核心）：
+                                        //   Incoming --body::boxed()--> BoxBody<Bytes, BoxError>
+                                        //   零拷贝，不在网关内存中聚合整个响应
+                                        let resp = upstream_resp.map(body::boxed);
+
+                                        // 包装 ObservedBody：body 流结束/断开时输出 AccessLog
+                                        return Ok(body::observe(resp, ctx));
+                                    },
+                                    // 上游连接失败 / 超时 → 502 / 504
+                                    Err(gateway_err) => {
+                                        ctx.finish_with_error(
+                                            gateway_err.code().as_str().to_string(),
+                                            gateway_err.to_string(),
+                                        );
+                                        (
+                                            gateway_err.code().to_http_status(),
+                                            gateway_err.code().as_str().to_string(),
+                                            gateway_err.to_string(),
+                                        )
+                                    },
+                                }
+                            },
+                            // 没有健康端点 → 503
+                            Err(_pick_err) => {
+                                let msg =
+                                    format!("upstream {upstream_id} has no healthy endpoints");
+                                ctx.finish_with_error(
+                                    ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
+                                    msg.clone(),
+                                );
+                                (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
+                                    msg,
+                                )
+                            },
+                        }
                     },
                 }
             },
@@ -481,34 +486,19 @@ impl Runtime {
         // 4. 统一错误响应构造
         // -----------------------------------------------------------------
 
-        // 构造 JSON 错误响应体（gateway_common::ErrorResponse 的 serde 序列化）
-        let json_body = serde_json::json!({
-            "code": error_code_str,
-            "message": error_msg,
-            "request_id": ctx.request_id.as_str(),
-        });
-        let body_bytes =
-            Bytes::from(serde_json::to_string(&json_body).unwrap_or_else(|_| "{}".to_string()));
+        // 把真实 HTTP 状态码写入 ctx（finish_with_error 的 status_code 字段
+        // 固定兜底为 502，这里用实际返回码覆盖，保证 AccessLog 准确）
+        ctx.status_code = Some(status_code.as_u16());
 
-        // 构造 HTTP 错误响应
-        let response = Response::builder()
-            .status(status_code)
-            .header("content-type", "application/json")
-            // Full::new(bytes) —— Fixed-size body，hyper 直接发送
-            .body(Full::new(body_bytes))
-            // 安全 unwrap：手动构造的 Response builder 只有在 URI/Header 格式错误时
-            // 才会失败，我们这里只设了 status 和两个 header，不会错
-            .unwrap_or_else(|_| {
-                Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Full::new(Bytes::from("{}")))
-                    .unwrap()
-            });
+        // body::error_response 内部用 Response::new + status_mut/headers_mut
+        // 原地写入构造，全程无 unwrap/expect（满足生产代码约束）
+        let resp =
+            body::error_response(status_code, &error_code_str, &error_msg, ctx.request_id.as_str());
 
-        // AccessLog 记录（错误路径）
-        gateway_observability::AccessLog::emit(&ctx);
-
-        Ok(response)
+        // 错误路径同样用 ObservedBody 包装：AccessLog 在错误 body
+        // 发送完成或客户端断开时输出（错误 body 很小，与立即输出差别不大，
+        // 但保持两条路径的日志时序语义一致）
+        Ok(body::observe(resp, ctx))
     }
 
     // ------------------------------------------------------------------

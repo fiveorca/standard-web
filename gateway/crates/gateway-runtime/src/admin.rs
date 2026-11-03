@@ -125,7 +125,11 @@ pub async fn start_admin_server(
         .await
         .map_err(|e| GatewayError::Internal(format!("admin bind error: {e}")))?;
 
-    let actual = listener.local_addr().unwrap();
+    // local_addr() 可能失败（如 fd 已关闭的极端场景），显式 map_err 传播，
+    // 生产代码禁止 unwrap/expect
+    let actual = listener
+        .local_addr()
+        .map_err(|e| GatewayError::Internal(format!("admin local addr error: {e}")))?;
     tracing::info!("admin server listening on {}", actual);
 
     // -----------------------------------------------------------------

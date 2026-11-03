@@ -27,9 +27,7 @@ use hyper::body::Incoming;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 
-use crate::headers::{
-    inject_forwarded_headers, strip_hop_by_hop, strip_response_hop_by_hop,
-};
+use crate::headers::{inject_forwarded_headers, strip_hop_by_hop, strip_response_hop_by_hop};
 
 // ---------------------------------------------------------------------------
 // ProxyOptions
@@ -181,7 +179,7 @@ where
                 // Hop-by-Hop Header 清洗（响应方向）
                 strip_response_hop_by_hop(&mut resp_parts.headers);
                 Ok(http::Response::from_parts(resp_parts, resp_body))
-            }
+            },
             // hyper client 连接错误 / 协议错误
             Ok(Err(hyper_err)) => {
                 tracing::warn!(
@@ -196,7 +194,7 @@ where
                     endpoint: endpoint.address(),
                     reason: hyper_err.to_string(),
                 })
-            }
+            },
             // 超时
             Err(_elapsed) => {
                 tracing::warn!(
@@ -208,7 +206,7 @@ where
                     upstream: endpoint.address(),
                     endpoint: endpoint.address(),
                 })
-            }
+            },
         }
     }
 }
@@ -259,10 +257,7 @@ mod tests {
         };
 
         // 构造测试请求：GET /hello，空 body
-        let request = http::Request::builder()
-            .method("GET")
-            .body(Full::new(Bytes::new()))
-            .unwrap();
+        let request = http::Request::builder().method("GET").body(Full::new(Bytes::new())).unwrap();
 
         let response = client
             .forward(request, &endpoint, "/hello", None)
@@ -289,15 +284,9 @@ mod tests {
             status: gateway_core::HealthStatus::Healthy,
         };
 
-        let request = http::Request::builder()
-            .method("GET")
-            .body(Full::new(Bytes::new()))
-            .unwrap();
+        let request = http::Request::builder().method("GET").body(Full::new(Bytes::new())).unwrap();
 
-        let err = client
-            .forward(request, &endpoint, "/", None)
-            .await
-            .expect_err("should fail");
+        let err = client.forward(request, &endpoint, "/", None).await.expect_err("should fail");
 
         assert!(matches!(err, GatewayError::UpstreamConnectionError { .. }));
     }

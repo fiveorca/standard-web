@@ -15,14 +15,20 @@
 //!
 //! # 泛型 Body 设计
 //!
-//! handler 的返回类型 `Response<ResBody>` 中 `ResBody` 是泛型的：
-//! - 成功路径（上游代理）：`ResBody = hyper::body::Incoming`
-//!   （hyper server 端的默认 body 类型，直接透传上游响应流）
-//! - 错误路径（404/502 等）：`ResBody = http_body_util::Empty<bytes::Bytes>`
-//!   （空 body，不携带 payload）
+//! handler 的返回类型 `Response<ResBody>` 中 `ResBody` 是泛型的。
+//! P2.0 起，gateway-runtime 统一使用
+//! `http_body_util::combinators::BoxBody<Bytes, BoxError>`（类型擦除）：
+//! - 成功路径（上游代理）：上游 `Incoming` 经 `BodyExt::boxed()` 流式透传
+//! - 错误路径（404/502 等）：内存构造的 `Full<Bytes>` JSON 经 `boxed()` 统一
 //!
-//! 这两种 Body 类型都满足 `hyper::body::Body + Send + Sync + 'static`
-//! 以及 `Body::Error: Into<Box<dyn StdError + Send + Sync>>`。
+//! 约束 `hyper::body::Body + Send + Sync + 'static`
+//! 以及 `Body::Error: Into<Box<dyn StdError + Send + Sync>>` 均满足。
+//!
+//! # 客户端地址注入（P2.0 新增）
+//!
+//! accept 连接后，对端 `SocketAddr` 会被写入 request extensions，
+//! handler 通过 `req.extensions().get::<SocketAddr>()` 提取 client_ip，
+//! 用于 AccessLog 与 X-Forwarded-For。
 
 use std::convert::Infallible;
 use std::error::Error as StdError;
@@ -218,8 +224,13 @@ impl HttpServer {
                         // tower::service_fn：接受一个 async 闭包，生成 Tower Service。
                         // Tower Service 的核心 trait 是 tower::Service<Request> → Future<Response>。
                         // 我们的 handler 闭包签名 Fn(Request<Incoming>) -> Fut 恰好匹配。
-                        let tower_svc = tower::service_fn(move |req: Request<Incoming>| {
+                        let tower_svc = tower::service_fn(move |mut req: Request<Incoming>| {
                             let svc = svc.clone();
+                            // 把客户端对端地址注入 request extensions（P2.0 新增）。
+                            // handler（Runtime::handle_request）从这里取 client_ip，
+                            // 用于 AccessLog 的 client_ip 字段和 X-Forwarded-For 头。
+                            // extensions_mut() 返回 &mut Extensions，insert 存任意 Send+Sync 类型。
+                            req.extensions_mut().insert(peer_addr);
                             // 直接调用闭包得到 Future，service_fn 会 .await 它
                             svc(req)
                         });

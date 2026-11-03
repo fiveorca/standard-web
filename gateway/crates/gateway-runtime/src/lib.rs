@@ -22,6 +22,7 @@
 #![allow(clippy::needless_doctest_main)]
 
 pub mod admin;
+pub mod body;
 pub mod pipeline;
 pub mod runtime;
 

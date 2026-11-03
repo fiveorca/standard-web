@@ -235,7 +235,8 @@ impl Endpoint {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// 判断端点是否可接收新流量。只有 HEALTHY 返回 true。
+    /// 判断端点是否可接收新流量。
+    /// 乐观可用语义：HEALTHY 和 UNKNOWN 返回 true（详见 HealthStatus::is_available）。
     pub fn is_available(&self) -> bool {
         self.status.is_available()
     }
@@ -248,7 +249,8 @@ impl Endpoint {
 /// 运行时上游。
 ///
 /// 包含完整的端点集合和负载均衡算法配置。
-/// 负载均衡器在选择实例时，只会从 `endpoints` 中筛选 `Healthy` 的端点。
+/// 负载均衡器在选择实例时，只会从 `endpoints` 中筛选"可用"的端点
+/// （Healthy + Unknown 乐观可用，详见 HealthStatus::is_available）。
 #[derive(Debug, Clone)]
 pub struct Upstream {
     pub id: String,

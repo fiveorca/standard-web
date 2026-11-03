@@ -111,9 +111,20 @@ pub enum HealthStatus {
 
 impl HealthStatus {
     /// 判断端点是否可接收新流量。
-    /// 只有 HEALTHY 返回 true。
+    ///
+    /// # 乐观可用（optimistic availability）语义
+    ///
+    /// `Healthy` 和 `Unknown` 都返回 true：
+    /// - `Healthy`：健康检查明确通过
+    /// - `Unknown`：尚未做过健康检查的端点。网关在主动健康检查接入前
+    ///   （Phase 2 健康检查模块之前）采用乐观策略——先放行，
+    ///   由被动失败统计（连接错误 / 5xx 比例）把它降级为 Unhealthy。
+    ///   若 Unknown 也不放行，则没有任何主动健康检查器的部署形态下
+    ///   所有端点永远无法被选中，数据面完全不可用。
+    ///
+    /// `Unhealthy` / `Draining` 返回 false。
     pub fn is_available(self) -> bool {
-        matches!(self, HealthStatus::Healthy)
+        matches!(self, HealthStatus::Healthy | HealthStatus::Unknown)
     }
 }
 

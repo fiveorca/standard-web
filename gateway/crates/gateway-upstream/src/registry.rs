@@ -211,15 +211,27 @@ mod tests {
             &[1, 1, 1],
         )]);
 
-        // 前三个 Endpoint 初始都是 Unknown，但 Unknown 不应该被选
-        // （healthy_endpoints() 只返回 Healthy）。
-        // 所以我们先把它们标记为 Healthy
+        // 前三个 Endpoint 初始都是 Unknown；乐观可用语义下 Unknown 也可被选，
+        // 这里显式标记为 Healthy 走最典型的健康路径
         for i in 0..3 {
             registry.update_health("u1", &format!("u1-ep-{i}"), HealthStatus::Healthy).await;
         }
 
         let ep = registry.pick_endpoint("u1").await.unwrap();
         assert!(ep.is_available());
+    }
+
+    /// 乐观可用语义：初始 Unknown 的端点在健康检查接入前就可被选中
+    #[tokio::test]
+    async fn pick_unknown_endpoint_optimistically_available() {
+        let registry = UpstreamRegistry::new(&[mk_upstream(
+            "u1",
+            gateway_core::LoadBalanceAlgorithm::RoundRobin,
+            &[1],
+        )]);
+        // 不更新健康状态 → Unknown，但应能选中
+        let ep = registry.pick_endpoint("u1").await.unwrap();
+        assert_eq!(ep.status, HealthStatus::Unknown);
     }
 
     #[tokio::test]
@@ -229,7 +241,8 @@ mod tests {
             gateway_core::LoadBalanceAlgorithm::RoundRobin,
             &[1],
         )]);
-        // 不更新健康状态 → Unknown
+        // 显式标记为 Unhealthy → 唯一端点不可用，pick 必须报错
+        registry.update_health("u1", "u1-ep-0", HealthStatus::Unhealthy).await;
         let err = registry.pick_endpoint("u1").await.unwrap_err();
         assert!(matches!(err, UpstreamError::NoHealthyEndpoints(_)));
     }
