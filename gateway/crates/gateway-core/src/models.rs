@@ -113,10 +113,28 @@ pub struct RouteConfig {
     /// 重试策略引用
     #[serde(default)]
     pub retry_policy_id: Option<String>,
+    /// 熔断策略引用（P2.1 新增）
+    #[serde(default)]
+    pub circuit_breaker_policy_id: Option<String>,
+    /// CORS 策略引用（P2.1 新增）
+    #[serde(default)]
+    pub cors_policy_id: Option<String>,
 
     // ---- 请求/响应转换（Phase 2+）---- //
     #[serde(default)]
     pub path_rewrite: Option<String>,
+    /// 请求 Header 转换策略引用（P2.1 新增）
+    ///
+    /// 转发前对请求头做 remove/set/add，策略定义在
+    /// `policies.request_transform`
+    #[serde(default)]
+    pub request_transform_id: Option<String>,
+    /// 响应 Header 转换策略引用（P2.1 新增）
+    ///
+    /// 返回客户端前对响应头做 remove/set/add，策略定义在
+    /// `policies.response_transform`
+    #[serde(default)]
+    pub response_transform_id: Option<String>,
 }
 
 // 小工具：serde default 函数

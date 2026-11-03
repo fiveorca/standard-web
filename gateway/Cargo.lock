@@ -513,6 +513,7 @@ dependencies = [
  "gateway-common",
  "http",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

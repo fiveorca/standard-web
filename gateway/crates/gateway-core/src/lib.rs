@@ -21,6 +21,7 @@
 //!
 //! - [`types`]：领域枚举（Path 类型、负载均衡算法、健康状态）
 //! - [`models`]：配置模型和运行时模型（Route/Service/Upstream/Endpoint）
+//! - [`policy`]：Phase 2 策略配置模型（鉴权/限流/超时/重试/熔断/CORS/转换）
 //! - [`traits`]：运行时 Trait（ServiceDiscoveryProvider、LoadBalancer）
 //! - [`request_context`]：请求上下文，贯穿整个 Pipeline
 //! - [`prelude`]：常用类型 re-export
@@ -28,6 +29,7 @@
 #![allow(clippy::needless_doctest_main)]
 
 pub mod models;
+pub mod policy;
 pub mod prelude;
 pub mod request_context;
 pub mod traits;
@@ -35,6 +37,7 @@ pub mod types;
 
 // 方便下游直接 use
 pub use models::*;
+pub use policy::*;
 pub use request_context::*;
 pub use traits::*;
 pub use types::*;

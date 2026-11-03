@@ -43,6 +43,14 @@ pub struct GatewayConfig {
     pub services: Vec<gateway_core::ServiceConfig>,
     #[serde(default)]
     pub routes: Vec<gateway_core::RouteConfig>,
+
+    /// Phase 2 策略配置段（P2.1 新增）。
+    ///
+    /// 所有治理策略（鉴权/限流/超时/重试/熔断/CORS/Header 转换）集中
+    /// 定义在这里，由 Route 通过 `*_policy_id` 按 ID 引用。
+    /// 未配置时各子列表为空，等价于"全部策略关闭"，不影响 Phase 1 行为。
+    #[serde(default)]
+    pub policies: PoliciesConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -326,4 +334,50 @@ impl Default for ControlPlaneConfig {
             reconnect_interval_secs: default_reconnect_interval(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// PoliciesConfig —— Phase 2 策略集合
+// ---------------------------------------------------------------------------
+
+/// 策略配置集合。
+///
+/// # 为什么按类型分段而不是一个扁平列表
+///
+/// 不同策略的字段结构完全不同（鉴权有 secret、限流有 rate），
+/// 分段可以让每类策略使用独立的强类型结构：
+///   - serde 反序列化阶段就能拒绝类型错误的字段（例如给限流写 `secret`）
+///   - validator 只需遍历对应段做针对性校验
+///   - 未来新增策略类型不影响已有段的 schema
+///
+/// # 引用与命名
+///
+/// 各段内的 `id` 只需在**本段内唯一**。Route 的引用字段是强类型的
+/// （`auth_policy_id` 只能引用 `auth` 段），因此跨段重名不会产生歧义。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PoliciesConfig {
+    /// 鉴权策略（IP 黑白名单 / Basic / API Key / JWT）
+    #[serde(default)]
+    pub auth: Vec<gateway_core::AuthPolicyConfig>,
+    /// 限流策略（Token Bucket / Fixed Window）
+    #[serde(default)]
+    pub rate_limit: Vec<gateway_core::RateLimitPolicyConfig>,
+    /// 超时策略（连接/首包/空闲）
+    #[serde(default)]
+    pub timeout: Vec<gateway_core::TimeoutPolicyConfig>,
+    /// 重试策略（幂等方法白名单 + 退避）
+    #[serde(default)]
+    pub retry: Vec<gateway_core::RetryPolicyConfig>,
+    /// 熔断策略（Closed / Open / HalfOpen 状态机参数）
+    #[serde(default)]
+    pub circuit_breaker: Vec<gateway_core::CircuitBreakerPolicyConfig>,
+    /// CORS 策略
+    #[serde(default)]
+    pub cors: Vec<gateway_core::CorsPolicyConfig>,
+    /// 请求 Header 转换策略
+    #[serde(default)]
+    pub request_transform: Vec<gateway_core::TransformPolicyConfig>,
+    /// 响应 Header 转换策略
+    #[serde(default)]
+    pub response_transform: Vec<gateway_core::TransformPolicyConfig>,
 }

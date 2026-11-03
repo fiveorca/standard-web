@@ -408,7 +408,12 @@ mod tests {
             auth_policy_id: None,
             rate_limit_policy_id: None,
             retry_policy_id: None,
+            // P2.1 新增的策略引用字段，测试中不使用
+            circuit_breaker_policy_id: None,
+            cors_policy_id: None,
             path_rewrite: None,
+            request_transform_id: None,
+            response_transform_id: None,
         }
     }
 

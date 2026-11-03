@@ -23,3 +23,7 @@ serde = { workspace = true }
 async-trait = { workspace = true }
 http = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# 测试用 JSON 反序列化（与 YAML 走同一 serde 路径，验证策略模型的字段契约）
+serde_json = { workspace = true }
