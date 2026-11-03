@@ -1,0 +1,24 @@
+# ======================================================================
+# gateway-routing：路由表编译与匹配
+# ----------------------------------------------------------------------
+# 设计原则：
+#   1. RouteTable 在启动时编译一次，运行时不可变。
+#   2. match 顺序严格按需求文档规定：Host → Path → Method → Header →
+#      Query → Priority。
+#   3. 冲突（同 Host+Path+Method+Header+Query+Priority）必须在编译时
+#      报错，不能依赖 HashMap 迭代顺序。
+# ======================================================================
+
+[package]
+name = "gateway-routing"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 路由表编译与匹配"
+license = "MIT"
+
+[dependencies]
+gateway-common = { path = "../gateway-common" }
+gateway-core = { path = "../gateway-core" }
+
+http = { workspace = true }
+serde = { workspace = true }

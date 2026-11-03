@@ -1,0 +1,25 @@
+# Rust 构建产物
+/target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Rust 产物
+Cargo.lock.bak
+
+# 环境
+.env
+.env.local
+.env.*.local
+
+# 测试产物
+*.log
+coverage/
+profraw/

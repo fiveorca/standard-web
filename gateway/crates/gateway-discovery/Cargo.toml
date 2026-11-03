@@ -1,0 +1,23 @@
+# ======================================================================
+# gateway-discovery：服务发现实现
+# ----------------------------------------------------------------------
+# Phase 1 只实现 StaticProvider（从 YAML 配置读取的静态端点列表）。
+# 后续阶段会加入 DNS / Kubernetes / Consul 等 Provider，
+# 统一通过 ServiceDiscoveryProvider Trait 抽象。
+# ======================================================================
+
+[package]
+name = "gateway-discovery"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 服务发现 Provider 实现"
+license = "MIT"
+
+[dependencies]
+gateway-common = { path = "../gateway-common" }
+gateway-core = { path = "../gateway-core" }
+
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

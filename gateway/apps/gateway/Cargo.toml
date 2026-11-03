@@ -1,0 +1,44 @@
+# ======================================================================
+# apps/gateway：网关可执行程序入口
+# ----------------------------------------------------------------------
+# 这个 crate 只负责：
+#   1. CLI 参数解析（clap）
+#   2. 调用 gateway-runtime 的 bootstrap
+#   3. 不实现任何业务逻辑
+# ======================================================================
+
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 可执行程序"
+license = "MIT"
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[dependencies]
+# workspace crates
+gateway-runtime = { path = "../../crates/gateway-runtime" }
+
+# 框架
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+gateway-proxy = { path = "../../crates/gateway-proxy" }
+gateway-common = { path = "../../crates/gateway-common" }
+
+hyper = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+
+wiremock = { workspace = true }
+assert-json-diff = { workspace = true }
+tempfile = { workspace = true }

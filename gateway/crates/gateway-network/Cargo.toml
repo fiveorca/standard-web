@@ -1,0 +1,28 @@
+# ======================================================================
+# gateway-network：Hyper Server 接入层
+# ----------------------------------------------------------------------
+# 设计原则：
+#   1. 监听端口、h1/h2、连接限制、并发请求限制。
+#   2. 优雅关闭：收到 SIGTERM 后停止接受新连接、等待在途请求。
+#   3. 不实现业务逻辑；业务逻辑在 runtime 组合根完成。
+# ======================================================================
+
+[package]
+name = "gateway-network"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway Hyper Server 接入层"
+license = "MIT"
+
+[dependencies]
+gateway-common = { path = "../gateway-common" }
+
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }

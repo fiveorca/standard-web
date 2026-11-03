@@ -1,0 +1,104 @@
+# ======================================================================
+# Gateway Workspace 根 Cargo.toml
+# ----------------------------------------------------------------------
+# 本项目是一个企业级 API Gateway，采用 Cargo Workspace 组织多 Crate。
+# 所有 Crate 共享统一的依赖版本、Lint 规则和编译配置。
+#
+# 约束：
+#   1. 所有第三方依赖版本在此处统一声明，各 crate 通过
+#      `{ workspace = true }` 引用，避免出现多个版本。
+#   2. 不允许循环依赖；依赖方向在 ARCHITECTURE.md 中明确。
+#   3. 所有 crate 统一启用 rustfmt 和 clippy 规则。
+# ======================================================================
+
+[workspace]
+# 显式列出所有 workspace 成员；未在此声明的目录不会被编译
+members = [
+    "apps/gateway",
+    "crates/gateway-common",
+    "crates/gateway-core",
+    "crates/gateway-config",
+    "crates/gateway-routing",
+    "crates/gateway-discovery",
+    "crates/gateway-upstream",
+    "crates/gateway-proxy",
+    "crates/gateway-network",
+    "crates/gateway-observability",
+    "crates/gateway-runtime",
+]
+
+# 使用 resolver 2 以获得更好的特性解算
+resolver = "2"
+
+# ----------------------------------------------------------------------
+# 统一第三方依赖版本（所有 crate 通过 workspace = true 引用）
+# ----------------------------------------------------------------------
+[workspace.dependencies]
+# 核心异步运行时
+tokio = { version = "1.54", features = ["full"] }
+futures = "0.3"
+
+# HTTP 协议层：hyper 负责协议处理，hyper-util 提供 server/client 构建工具
+hyper = { version = "1.12", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http = "1.5"
+http-body = "1.0"
+http-body-util = "0.1"
+bytes = "1.12"
+
+# Tower/Tower-HTTP：统一 Service/Layer 抽象，请求处理 Pipeline 的核心
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.7", features = ["full"] }
+
+# Axum：仅用于控制面 / 管理接口（Health/Admin API），不承载数据面代理
+axum = { version = "0.8", features = ["macros", "json"] }
+axum-core = "0.4"
+
+# 序列化：serde + serde_json + serde_yaml_ng（serde_yaml 已标记 deprecated）
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml_ng = "0.10"
+
+# 错误处理：thiserror 定义错误枚举，anyhow 用于通用包装
+thiserror = "2.0"
+anyhow = "1.0"
+
+# 日志与追踪：tracing + tracing-subscriber（JSON 格式）
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# 配置库
+figment = { version = "0.10", features = ["yaml", "env"] }
+
+# UUID：生成实例 ID、请求 ID
+uuid = { version = "1.29", features = ["v4"] }
+
+# 原子 Arc 替换：数据面运行时快照的原子交换
+arc-swap = "1.9"
+
+# 异步 trait：需要在 async fn in trait 稳定前提供类型擦除
+async-trait = "0.1"
+
+# CLI：apps/gateway 的命令行参数解析
+clap = { version = "4.6", features = ["derive", "env"] }
+
+# 测试工具
+tempfile = "3.14"
+wiremock = "0.6"
+assert-json-diff = "2"
+
+# 随机数：负载均衡的 Random/WeightedRandom 算法
+rand = "0.8"
+
+# 信号处理：apps/gateway 中监听 SIGTERM/SIGINT 实现优雅关闭
+signal-hook = "0.3"
+
+# Tokio 扩展：CancellationToken 等
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# ----------------------------------------------------------------------
+# 统一 Lint 配置
+# ----------------------------------------------------------------------
+# clippy/rust 警告不在这里强制 deny，而是在 CI 和阶段验收时通过
+# `cargo clippy --workspace --all-targets -- -D warnings` 显式开启。
+# 这样可以让项目在开发过程中先编译通过，再逐步清理警告。
