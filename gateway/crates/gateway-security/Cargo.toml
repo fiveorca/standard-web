@@ -1,0 +1,49 @@
+# ======================================================================
+# gateway-security：鉴权能力（P2.3）
+# ----------------------------------------------------------------------
+# 职责：
+#   1. 把 `gateway-core::policy` 中的 AuthPolicyConfig 编译为可执行策略
+#      （IP 黑白名单 / Basic / API Key / JWT）
+#   2. 以 `Plugin` 形式挂到 Authentication 阶段，认证失败短路返回 401/403
+#
+# 依赖方向（不允许反向依赖）：
+#   gateway-common ← gateway-core ← gateway-plugin ← gateway-security
+#   gateway-security 不依赖 runtime/proxy/network，插件层因此无法绕过
+#   Core 的安全边界、也无法自行发起上游请求。
+# ======================================================================
+
+[package]
+name = "gateway-security"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 鉴权能力：IP 黑白名单、Basic、API Key、JWT（静态密钥）"
+license = "MIT"
+
+[dependencies]
+# 项目内依赖：错误码 / 策略模型 / 插件接口
+gateway-common = { path = "../gateway-common" }
+gateway-core = { path = "../gateway-core" }
+gateway-plugin = { path = "../gateway-plugin" }
+
+# HTTP 基础类型：Parts / HeaderMap / Uri / StatusCode / HeaderValue / HeaderName
+http = { workspace = true }
+# JWT 解析与 HMAC 验签（只允许 HS256/HS384/HS512，白名单由策略决定）
+jsonwebtoken = { workspace = true }
+# Basic 凭据的 base64 解码
+base64 = { workspace = true }
+# CIDR / 单 IP 网段匹配
+ipnet = { workspace = true }
+# 凭据比较的常量时间原语（防止时序侧信道）
+subtle = { workspace = true }
+# Query 参数解码（API Key / JWT 的 query_param 读取）
+form_urlencoded = { workspace = true }
+# 插件接口的类型擦除（Plugin trait 的 async fn）
+async-trait = { workspace = true }
+# 鉴权失败/拒绝的结构化日志
+tracing = { workspace = true }
+# Plugin::validate_config 的签名需要 serde_json::Value
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# 测试需要 #[tokio::test] 与插件链执行
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

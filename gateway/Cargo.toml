@@ -25,6 +25,7 @@ members = [
     "crates/gateway-network",
     "crates/gateway-observability",
     "crates/gateway-plugin",
+    "crates/gateway-security",
     "crates/gateway-runtime",
 ]
 
@@ -96,6 +97,20 @@ signal-hook = "0.3"
 
 # Tokio 扩展：CancellationToken 等
 tokio-util = { version = "0.7", features = ["rt"] }
+
+# ----------------------------------------------------------------------
+# 安全能力（P2.3 gateway-security）
+# ----------------------------------------------------------------------
+# JWT 解析与 HMAC 验签：9.x 会校验算法白名单、exp/nbf/iss/aud
+jsonwebtoken = "9.3"
+# Basic 凭据的 base64 解码（RFC 7617）
+base64 = "0.22"
+# CIDR 与单个 IP 的网段匹配（IP Allowlist / Denylist）
+ipnet = "2"
+# 常量时间比较，避免凭据比较的时序侧信道
+subtle = "2"
+# Query 参数的百分号解码（API Key / JWT 的 query_param 读取方式）
+form_urlencoded = "1"
 
 # ----------------------------------------------------------------------
 # 统一 Lint 配置
