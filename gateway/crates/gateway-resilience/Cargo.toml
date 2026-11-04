@@ -1,0 +1,41 @@
+# ======================================================================
+# gateway-resilience：超时 / 重试 / 熔断（P2.6）
+# ----------------------------------------------------------------------
+# 职责：
+#   1. 编译三类策略：timeout / retry / circuit_breaker
+#   2. 熔断以 Plugin 形式挂到插件链：
+#      - CircuitBreakerGuard   → RequestPreUpstream（检查是否 OPEN）
+#      - CircuitBreakerRecord   → UpstreamResponse（记录成功/失败）
+#   3. timeout / retry 编译为可执行结构，供 Runtime/Proxy 直接消费
+#      （这两类是 HTTP 客户端参数，不走插件链——Phase 2 只做策略编译）
+#
+# 依赖方向：
+#   gateway-common ← gateway-core ← gateway-plugin ← gateway-resilience
+# ======================================================================
+
+[package]
+name = "gateway-resilience"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 韧性：Timeout / Retry / Circuit Breaker"
+license = "MIT"
+
+[dependencies]
+# 项目内依赖
+gateway-common = { path = "../gateway-common" }
+gateway-core = { path = "../gateway-core" }
+gateway-plugin = { path = "../gateway-plugin" }
+
+# HTTP 状态码判断（重试/熔断的可重试状态码匹配）
+http = { workspace = true }
+# 插件 trait 的 async fn 类型擦除
+async-trait = { workspace = true }
+# 熔断状态机并发保护
+tokio = { workspace = true, features = ["sync", "time"] }
+# 熔断状态转换的结构化日志
+tracing = { workspace = true }
+# Plugin::validate_config 需要 serde_json::Value
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

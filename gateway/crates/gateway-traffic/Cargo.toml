@@ -1,0 +1,41 @@
+# ======================================================================
+# gateway-traffic：流量治理（P2.4）
+# ----------------------------------------------------------------------
+# 职责：
+#   1. Token Bucket 与 Fixed Window 限流算法（进程内内存实现）
+#   2. 按策略配置的计数键（client_ip / global / header / route）分桶
+#   3. 实现为 gateway-plugin 的 Plugin，挂 RequestPostRoute 阶段
+#   4. 429 短路响应 + Retry-After Header
+#
+# 依赖方向：
+#   gateway-common ← gateway-core ← gateway-plugin ← gateway-traffic
+#   本 crate 不依赖 runtime/network/proxy，无法绕过安全边界。
+# ======================================================================
+
+[package]
+name = "gateway-traffic"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 流量治理：限流（Token Bucket / Fixed Window）"
+license = "MIT"
+
+[dependencies]
+# 项目内依赖：错误码 / 策略模型 / 插件接口
+gateway-common = { path = "../gateway-common" }
+gateway-core = { path = "../gateway-core" }
+gateway-plugin = { path = "../gateway-plugin" }
+
+# HTTP 基础类型：StatusCode / HeaderValue / HeaderName
+http = { workspace = true }
+# 插件 trait 的 async fn 类型擦除
+async-trait = { workspace = true }
+# 限流触发/跳过的结构化日志
+tracing = { workspace = true }
+# Plugin::validate_config 的签名需要 serde_json::Value
+serde_json = { workspace = true }
+# tokio::sync::Mutex 用于限流器内部状态的并发保护
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+# 测试需要 #[tokio::test]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

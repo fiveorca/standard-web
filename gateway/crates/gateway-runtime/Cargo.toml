@@ -30,6 +30,9 @@ gateway-proxy = { path = "../gateway-proxy" }
 gateway-network = { path = "../gateway-network" }
 gateway-observability = { path = "../gateway-observability" }
 
+# Phase 2 插件能力（runtime 的生产依赖暂不包含插件组装；
+# 真实组装留给 Phase 3 Pipeline 改造。这里只加 dev-dependencies 做集成测试）
+
 # 框架
 axum = { workspace = true }
 hyper = { workspace = true }
@@ -46,3 +49,17 @@ bytes = { workspace = true }
 signal-hook = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Phase 2 插件 crate：集成测试用（不进入 runtime 的生产依赖）
+gateway-plugin = { path = "../gateway-plugin" }
+gateway-security = { path = "../gateway-security" }
+gateway-traffic = { path = "../gateway-traffic" }
+gateway-transform = { path = "../gateway-transform" }
+gateway-resilience = { path = "../gateway-resilience" }
+
+# 测试辅助
+base64 = { workspace = true }
+wiremock = { workspace = true }
+assert-json-diff = { workspace = true }
+tempfile = { workspace = true }

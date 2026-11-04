@@ -1,0 +1,38 @@
+# ======================================================================
+# gateway-transform：请求/响应 Header 转换（P2.5）
+# ----------------------------------------------------------------------
+# 职责：
+#   1. 把 `gateway-core::policy::TransformPolicyConfig` 编译为可执行策略
+#   2. 实现为 gateway-plugin 的 Plugin
+#      - RequestTransformPlugin  → RequestPreUpstream 阶段
+#      - ResponseTransformPlugin → ResponsePreClient 阶段
+#   3. 支持 `${request_id}` / `${client_ip}` / `${method}` 等占位符替换
+#
+# 依赖方向：
+#   gateway-common ← gateway-core ← gateway-plugin ← gateway-transform
+# ======================================================================
+
+[package]
+name = "gateway-transform"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway Header 转换：删除 / 覆盖 / 追加 + 占位符"
+license = "MIT"
+
+[dependencies]
+# 项目内依赖
+gateway-common = { path = "../gateway-common" }
+gateway-core = { path = "../gateway-core" }
+gateway-plugin = { path = "../gateway-plugin" }
+
+# HTTP 基础类型
+http = { workspace = true }
+# 插件 trait 的 async fn 类型擦除
+async-trait = { workspace = true }
+# Header 转换的结构化日志
+tracing = { workspace = true }
+# Plugin::validate_config 需要 serde_json::Value
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

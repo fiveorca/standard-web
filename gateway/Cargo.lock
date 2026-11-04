@@ -612,6 +612,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-resilience"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gateway-common",
+ "gateway-core",
+ "gateway-plugin",
+ "http",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gateway-routing"
 version = "0.1.0"
 dependencies = [
@@ -627,7 +641,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "assert-json-diff",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "gateway-common",
  "gateway-config",
@@ -635,8 +651,13 @@ dependencies = [
  "gateway-discovery",
  "gateway-network",
  "gateway-observability",
+ "gateway-plugin",
  "gateway-proxy",
+ "gateway-resilience",
  "gateway-routing",
+ "gateway-security",
+ "gateway-traffic",
+ "gateway-transform",
  "gateway-upstream",
  "http",
  "http-body-util",
@@ -645,10 +666,12 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tower",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
@@ -666,6 +689,34 @@ dependencies = [
  "jsonwebtoken",
  "serde_json",
  "subtle",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gateway-traffic"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gateway-common",
+ "gateway-core",
+ "gateway-plugin",
+ "http",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gateway-transform"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gateway-common",
+ "gateway-core",
+ "gateway-plugin",
+ "http",
+ "serde_json",
  "tokio",
  "tracing",
 ]

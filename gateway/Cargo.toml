@@ -26,6 +26,9 @@ members = [
     "crates/gateway-observability",
     "crates/gateway-plugin",
     "crates/gateway-security",
+    "crates/gateway-traffic",
+    "crates/gateway-transform",
+    "crates/gateway-resilience",
     "crates/gateway-runtime",
 ]
 
