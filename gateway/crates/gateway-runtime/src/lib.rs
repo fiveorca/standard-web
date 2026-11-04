@@ -25,5 +25,7 @@ pub mod admin;
 pub mod body;
 pub mod pipeline;
 pub mod runtime;
+pub mod state;
 
 pub use runtime::{Runtime, RuntimeHandle};
+pub use state::{RuntimeState, SnapshotApplyError, SnapshotStore, INITIAL_CONFIG_VERSION};

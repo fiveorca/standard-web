@@ -93,6 +93,7 @@ struct VersionResponse {
 /// - `addr`：监听地址（通常是 127.0.0.1:8081）
 /// - `runtime`：共享的 Runtime 实例（Arc 包装），handler 通过 State extractor 访问
 /// - `shutdown`：CancellationToken，收到信号后执行 graceful shutdown
+/// - `extra`：额外挂载的路由（integrated 模式下为控制面 `/api/admin/v1`）
 ///
 /// # axum 0.8 API
 /// - `axum::Router::new()` —— 新建路由表
@@ -104,6 +105,7 @@ pub async fn start_admin_server(
     addr: SocketAddr,
     runtime: Arc<Runtime>,
     shutdown: CancellationToken,
+    extra: Option<Router>,
 ) -> Result<(), GatewayError> {
     // -----------------------------------------------------------------
     // 1. 组装路由
@@ -117,6 +119,13 @@ pub async fn start_admin_server(
         // with_state 把 runtime 注入 Router
         // handler 通过 State<Arc<Runtime>> extractor 拿到它
         .with_state(runtime);
+
+    // integrated 模式：把控制面路由合并进来。`extra` 已经是 `Router<()>`，
+    // 与上面 with_state 之后的 Router 状态类型一致，可以直接 merge。
+    let app = match extra {
+        Some(extra) => app.merge(extra),
+        None => app,
+    };
 
     // -----------------------------------------------------------------
     // 2. 绑定 TcpListener

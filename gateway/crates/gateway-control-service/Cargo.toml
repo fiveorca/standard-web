@@ -1,0 +1,40 @@
+# ======================================================================
+# gateway-control-service：控制面业务服务
+# ----------------------------------------------------------------------
+# 职责：
+#   1. 资源 CRUD（写操作带审计）
+#   2. 发布：全量加载 → 校验 → 编译 → 原子落库 → 应用快照
+#   3. 回滚：读取历史快照 → 作为新版本重新发布
+#   4. 版本 / 审计 / 发布记录查询
+#
+# 约束：
+#   - 不依赖 gateway-runtime（快照应用通过 SnapshotApplier trait 回调）
+#   - 不依赖 axum（HTTP 层在 gateway-control-api）
+# ======================================================================
+
+[package]
+name = "gateway-control-service"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 控制面业务服务"
+license = "MIT"
+
+[dependencies]
+# 本项目 crates
+gateway-common = { path = "../gateway-common" }
+gateway-core = { path = "../gateway-core" }
+gateway-config = { path = "../gateway-config" }
+gateway-storage = { path = "../gateway-storage" }
+
+# 异步 / 序列化
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

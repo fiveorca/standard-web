@@ -27,12 +27,16 @@
 // 配置结构体的 impl Default 普遍需要自定义默认值，clippy::derivable_impls 在此场景下过于激进
 #![allow(clippy::derivable_impls)]
 
+pub mod compile;
 pub mod config;
 pub mod loader;
+pub mod snapshot;
 pub mod validator;
 
-pub use config::GatewayConfig;
+pub use compile::{ResourceBundle, SCHEMA_VERSION};
+pub use config::{GatewayConfig, PoliciesConfig};
 pub use loader::load_from_path;
+pub use snapshot::CompiledSnapshot;
 pub use validator::validate;
 
 /// 配置校验错误。

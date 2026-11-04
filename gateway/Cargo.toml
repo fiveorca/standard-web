@@ -15,6 +15,7 @@
 # 显式列出所有 workspace 成员；未在此声明的目录不会被编译
 members = [
     "apps/gateway",
+    "apps/gateway-control",
     "crates/gateway-common",
     "crates/gateway-core",
     "crates/gateway-config",
@@ -30,6 +31,9 @@ members = [
     "crates/gateway-transform",
     "crates/gateway-resilience",
     "crates/gateway-runtime",
+    "crates/gateway-storage",
+    "crates/gateway-control-service",
+    "crates/gateway-control-api",
 ]
 
 # 使用 resolver 2 以获得更好的特性解算
@@ -114,6 +118,35 @@ ipnet = "2"
 subtle = "2"
 # Query 参数的百分号解码（API Key / JWT 的 query_param 读取方式）
 form_urlencoded = "1"
+
+# ----------------------------------------------------------------------
+# 控制面与持久化（P3 配置管理与控制面）
+# ----------------------------------------------------------------------
+# SQLx：控制面 PostgreSQL 访问。
+#   1. default-features = false：不启用默认的 TLS/驱动组合，避免多余依赖
+#   2. runtime-tokio：使用 Tokio 异步运行时
+#   3. postgres：PostgreSQL 驱动
+#   4. json：JSONB ↔ serde_json::Value 双向映射
+#   5. chrono：TIMESTAMPTZ ↔ chrono::DateTime<Utc>
+#   6. migrate：内置迁移执行器
+#   7. macros：提供 sqlx::migrate!（只读取迁移目录，不需要 DATABASE_URL）
+#
+# 约束：生产代码不使用 query!/query_as! 编译期校验宏，避免没有数据库连接时
+# 无法构建；全部使用运行时 sqlx::query/query_as。
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "json",
+    "chrono",
+    "migrate",
+    "macros",
+] }
+
+# 时间：配置版本/审计日志的 UTC 时间戳
+chrono = { version = "0.4", features = ["serde"] }
+
+# 摘要：配置快照 checksum（SHA-256）
+sha2 = "0.10"
 
 # ----------------------------------------------------------------------
 # 统一 Lint 配置

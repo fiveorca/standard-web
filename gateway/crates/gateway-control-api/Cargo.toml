@@ -1,0 +1,40 @@
+# ======================================================================
+# gateway-control-api：控制面 Admin API（HTTP 层）
+# ----------------------------------------------------------------------
+# 职责：
+#   1. 定义 /api/admin/v1 路由
+#   2. Bearer Token 认证 + 两级 RBAC（admin / viewer）
+#   3. 请求/响应 DTO 转换
+#   4. 统一错误 JSON（code / message / request_id / trace_id）
+#   5. 分页查询
+#
+# 约束：
+#   - 只做 HTTP 适配，业务规则全部在 gateway-control-service
+#   - 不泄露堆栈、SQL、密钥
+# ======================================================================
+
+[package]
+name = "gateway-control-api"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway 控制面 Admin API"
+license = "MIT"
+
+[dependencies]
+gateway-config = { path = "../gateway-config" }
+gateway-storage = { path = "../gateway-storage" }
+gateway-control-service = { path = "../gateway-control-service" }
+
+axum = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+# 常量时间比较，避免 token 比较的时序侧信道
+subtle = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }

@@ -49,6 +49,7 @@ bytes = { workspace = true }
 signal-hook = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 # Phase 2 插件 crate：集成测试用（不进入 runtime 的生产依赖）

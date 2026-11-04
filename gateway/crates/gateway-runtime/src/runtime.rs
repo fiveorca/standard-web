@@ -32,13 +32,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gateway_common::{GatewayError, RequestId};
-use gateway_config::{load_from_path, validate, GatewayConfig};
+use gateway_config::{load_from_path, validate, CompiledSnapshot, GatewayConfig};
 use gateway_core::UpstreamManager;
 use gateway_network::{HttpServer, ServerOptions};
 use gateway_observability::init_logging;
 use gateway_proxy::{ProxyClient, ProxyOptions};
-use gateway_routing::RouteTable;
-use gateway_upstream::UpstreamRegistry;
 
 use http::{Request, Response, StatusCode};
 use hyper::body::Incoming;
@@ -46,6 +44,7 @@ use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::body::{self, ResBody};
+use crate::state::{SnapshotApplyError, SnapshotStore};
 
 // ---------------------------------------------------------------------------
 // Runtime 结构体
@@ -62,19 +61,14 @@ use crate::body::{self, ResBody};
 /// - 运行阶段：`runtime.start()` 阻塞直到 shutdown 信号
 /// - 退出阶段：CancellationToken 触发 → accept loop 停止 → 在途请求 drain
 pub struct Runtime {
-    /// 完整的 Gateway 配置（不可变，Phase 3 热更新前都是一次性加载）
-    config: GatewayConfig,
-    /// 编译好的路由表：Host → 前缀树 → Route
-    route_table: Arc<RouteTable>,
-    /// 上游注册表：UpstreamId → Upstream（含健康端点列表）
-    upstream_registry: Arc<UpstreamRegistry>,
-    /// Service → Upstream 的引用解析表。
+    /// 完整的 Gateway 配置。
     ///
-    /// 配置模型是 Route → Service → Upstream 三级引用
-    /// （Route.service_id → Service.upstream_id），而 UpstreamRegistry
-    /// 以 upstream_id 为键。本表在启动时从 cfg.services 一次性构建，
-    /// 请求路径上只做一次 HashMap 查找，零分配（借用 &str 键）。
-    service_upstreams: Arc<std::collections::HashMap<String, String>>,
+    /// 只保存与"运行时环境"相关的部分（server/runtime/observability/gateway
+    /// 元信息）；可变资源（routes/services/upstreams/policies）在
+    /// [`SnapshotStore`] 中以快照形式保存，支持热更新。
+    config: GatewayConfig,
+    /// 配置快照存储：路由表 / 上游注册表 / Service→Upstream 映射
+    snapshots: Arc<SnapshotStore>,
     /// 反向代理客户端：hyper Client 实例（连接池在 hyper 内部管理）
     proxy_client: Arc<ProxyClient>,
 }
@@ -104,31 +98,30 @@ impl Runtime {
         validate(&cfg)?;
 
         // 3. 构建 Runtime
-        Ok(Self::build(cfg))
+        Self::build(cfg)
     }
 
     /// 从内存中的 GatewayConfig 直接构建（主要用于测试）。
     ///
     /// # 参数
     /// - `cfg`：已经加载 + 校验过的配置对象
-    pub fn build(cfg: GatewayConfig) -> Self {
+    ///
+    /// # 返回
+    /// - `Ok(Runtime)`：构建成功
+    /// - `Err(Vec<ConfigError>)`：快照编译失败（当前只可能是 checksum 序列化错误）
+    pub fn build(cfg: GatewayConfig) -> Result<Self, Vec<gateway_config::ConfigError>> {
         // 初始化 tracing 日志（JSON 格式，输出到 stderr）
         init_logging(&cfg.observability.logging.level, &cfg.observability.logging.format);
 
-        // 编译路由表：RouteTable::compile 会按 Host 分桶、按优先级排序
-        let route_table = Arc::new(RouteTable::compile(&cfg.routes));
+        // 构建初始配置快照：编译路由表 + 上游注册表 + Service 映射，
+        // 后续热更新通过 SnapshotStore::apply 原子替换
+        let snapshots = Arc::new(
+            SnapshotStore::from_config(&cfg).map_err(|e| vec![e])?,
+        );
         tracing::info!(
             target: "runtime",
             route_count = cfg.routes.iter().filter(|r| r.enabled).count(),
             "route table compiled"
-        );
-
-        // 构建上游注册表：从配置里的 upstreams 构建健康端点列表
-        let upstream_registry = Arc::new(UpstreamRegistry::new(&cfg.upstreams));
-        tracing::info!(
-            target: "runtime",
-            upstream_count = upstream_registry.upstream_count(),
-            "upstream registry built"
         );
 
         // 初始化代理客户端：hyper-util Client 构造（HTTP/1.1 连接池）
@@ -140,23 +133,11 @@ impl Runtime {
             connect_timeout: Duration::from_secs(5),
         }));
 
-        // 构建 Service → Upstream 引用解析表。
-        // gateway_config::validate() 已保证 Service.upstream_id 指向存在的
-        // Upstream（引用完整性校验），所以这里不需要再校验目标存在性。
-        let service_upstreams = Arc::new(
-            cfg.services
-                .iter()
-                .map(|svc| (svc.id.clone(), svc.upstream_id.clone()))
-                .collect::<std::collections::HashMap<_, _>>(),
-        );
-
-        Self {
+        Ok(Self {
             config: cfg,
-            route_table,
-            upstream_registry,
-            service_upstreams,
+            snapshots,
             proxy_client,
-        }
+        })
     }
 
     /// 启动所有 Listener 并阻塞直到收到 shutdown 信号。
@@ -174,6 +155,18 @@ impl Runtime {
     /// 5. tokio::select! 等待 shutdown 或任一 server 意外退出
     /// 6. 优雅关闭等待（在途请求 drain 时间）
     pub async fn start(self: Arc<Self>) -> Result<(), GatewayError> {
+        self.start_with_admin(None).await
+    }
+
+    /// 启动所有 Listener，并把额外的管理路由挂载到 Admin 端口。
+    ///
+    /// `extra_admin` 用于 integrated 模式：`apps/gateway` 构建控制面
+    /// Admin API（`/api/admin/v1`）后通过本参数挂载，实现同一个进程内
+    /// "控制面写入 → 数据面热更新"。独立部署时传 `None`。
+    pub async fn start_with_admin(
+        self: Arc<Self>,
+        extra_admin: Option<axum::Router>,
+    ) -> Result<(), GatewayError> {
         let rt = self.clone();
 
         // =================================================================
@@ -198,8 +191,15 @@ impl Runtime {
         let admin_task = if rt.config.server.admin.enabled {
             let rt_clone = rt.clone();
             tokio::spawn(async move {
-                // admin::start_admin_server 是 Axum 启动入口
-                crate::admin::start_admin_server(admin_addr, rt_clone, admin_shutdown).await
+                // admin::start_admin_server 是 Axum 启动入口；
+                // extra_admin 为控制面路由（integrated 模式）
+                crate::admin::start_admin_server(
+                    admin_addr,
+                    rt_clone,
+                    admin_shutdown,
+                    extra_admin,
+                )
+                .await
             })
         } else {
             tracing::info!("admin server disabled");
@@ -352,8 +352,13 @@ impl Runtime {
         // 2. Route 匹配
         // -----------------------------------------------------------------
 
+        // 每个请求只读取一次当前快照：后续路由/上游解析都基于同一份
+        // `Arc<RuntimeState>`，即使并发热更新也不会出现撕裂读
+        let state = self.snapshots.current();
+
         let match_result =
-            self.route_table
+            state
+                .route_table
                 .resolve(&host, &path, method.as_str(), &headers, query.as_deref());
 
         // -----------------------------------------------------------------
@@ -369,7 +374,7 @@ impl Runtime {
                 // Route 引用的是 service_id，而 UpstreamRegistry 以 upstream_id
                 // 为键，先查 service_upstreams 映射表拿到 upstream_id。
                 // validate() 已保证引用完整，查不到属于内部错误 → 500。
-                let upstream_id = self.service_upstreams.get(&route.service_id).cloned();
+                let upstream_id = state.service_upstreams.get(&route.service_id).cloned();
 
                 match upstream_id {
                     // Service → Upstream 映射缺失（配置内部错误）→ 500
@@ -390,7 +395,7 @@ impl Runtime {
                     },
                     Some(upstream_id) => {
                         // 从 UpstreamRegistry 选出一个健康实例（Round-Robin 算法）
-                        match self.upstream_registry.pick_endpoint(&upstream_id).await {
+                        match state.upstream_registry.pick_endpoint(&upstream_id).await {
                             Ok(endpoint) => {
                                 ctx.set_endpoint(endpoint.clone());
                                 ctx.mark_upstream_start();
@@ -521,9 +526,35 @@ impl Runtime {
     pub fn is_ready(&self) -> bool {
         true
     }
-    /// 配置版本号（Phase 1 固定 1；Phase 3 热更新后每次 +1）
+    /// 管理端口是否启用（integrated 模式挂载控制面前提）。
+    pub fn admin_enabled(&self) -> bool {
+        self.config.server.admin.enabled
+    }
+
+    /// 配置版本号（YAML 启动为 1；控制面发布后随快照递增）
     pub fn config_version(&self) -> u64 {
-        1
+        self.snapshots.config_version()
+    }
+
+    /// 当前生效配置的 checksum。
+    pub fn config_checksum(&self) -> String {
+        self.snapshots.checksum()
+    }
+
+    /// 获取快照存储句柄（integrated 模式的控制面回调使用）。
+    pub fn snapshot_store(&self) -> Arc<SnapshotStore> {
+        self.snapshots.clone()
+    }
+
+    /// 应用控制面发布的快照（原子热更新）。
+    ///
+    /// 失败时旧配置继续生效；调用方（控制面服务）负责把失败记录为
+    /// 实例应用失败。
+    pub fn apply_snapshot(
+        &self,
+        snapshot: &CompiledSnapshot,
+    ) -> Result<u64, SnapshotApplyError> {
+        self.snapshots.apply(snapshot)
     }
 }
 
