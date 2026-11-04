@@ -24,6 +24,7 @@ members = [
     "crates/gateway-proxy",
     "crates/gateway-network",
     "crates/gateway-observability",
+    "crates/gateway-plugin",
     "crates/gateway-runtime",
 ]
 

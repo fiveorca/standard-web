@@ -556,6 +556,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "gateway-common",
+ "gateway-core",
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gateway-proxy"
 version = "0.1.0"
 dependencies = [
