@@ -380,4 +380,10 @@ pub struct PoliciesConfig {
     /// 响应 Header 转换策略
     #[serde(default)]
     pub response_transform: Vec<gateway_core::TransformPolicyConfig>,
+    /// WAF 策略（Phase 7）
+    #[serde(default)]
+    pub waf: Vec<gateway_core::WafPolicyConfig>,
+    /// 配额策略（Phase 7）
+    #[serde(default)]
+    pub quota: Vec<gateway_core::QuotaPolicyConfig>,
 }

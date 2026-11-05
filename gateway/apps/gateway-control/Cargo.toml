@@ -23,6 +23,7 @@ path = "src/main.rs"
 [dependencies]
 # workspace crates
 gateway-control-api = { path = "../../crates/gateway-control-api" }
+gateway-control-grpc = { path = "../../crates/gateway-control-grpc" }
 gateway-control-service = { path = "../../crates/gateway-control-service" }
 gateway-storage = { path = "../../crates/gateway-storage" }
 gateway-observability = { path = "../../crates/gateway-observability" }
@@ -30,6 +31,7 @@ gateway-observability = { path = "../../crates/gateway-observability" }
 # 框架
 axum = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

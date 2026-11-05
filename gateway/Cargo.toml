@@ -34,6 +34,7 @@ members = [
     "crates/gateway-storage",
     "crates/gateway-control-service",
     "crates/gateway-control-api",
+    "crates/gateway-control-grpc",
 ]
 
 # 使用 resolver 2 以获得更好的特性解算
@@ -147,6 +148,24 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # 摘要：配置快照 checksum（SHA-256）
 sha2 = "0.10"
+
+# ----------------------------------------------------------------------
+# 控制面 ↔ 数据面 gRPC 配置分发（P4）
+# ----------------------------------------------------------------------
+# tonic：gRPC over HTTP/2；启用 transport + codegen + prost + router
+# （router 提供 Server::add_service，server 侧注册服务必需）
+tonic = { version = "0.13", default-features = false, features = [
+    "transport",
+    "codegen",
+    "prost",
+    "router",
+] }
+prost = "0.13"
+tokio-stream = "0.1"
+
+# 构建期：proto 代码生成与 vendored protoc（构建机无需预装 protoc）
+tonic-build = "0.13"
+protoc-bin-vendored = "3"
 
 # ----------------------------------------------------------------------
 # 统一 Lint 配置

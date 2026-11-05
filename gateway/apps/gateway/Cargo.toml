@@ -22,6 +22,7 @@ path = "src/main.rs"
 # workspace crates
 gateway-config = { path = "../../crates/gateway-config" }
 gateway-control-api = { path = "../../crates/gateway-control-api" }
+gateway-control-grpc = { path = "../../crates/gateway-control-grpc" }
 gateway-control-service = { path = "../../crates/gateway-control-service" }
 gateway-runtime = { path = "../../crates/gateway-runtime" }
 gateway-storage = { path = "../../crates/gateway-storage" }

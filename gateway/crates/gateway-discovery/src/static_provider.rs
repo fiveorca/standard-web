@@ -82,9 +82,12 @@ mod tests {
         UpstreamConfig {
             id: id.to_string(),
             name: None,
+            tenant_id: None,
+            cluster_id: None,
             enabled: true,
             algorithm: gateway_core::LoadBalanceAlgorithm::RoundRobin,
             endpoints,
+            discovery: None,
         }
     }
 
@@ -98,6 +101,7 @@ mod tests {
                 port: 9090,
                 weight: 1,
                 zone: None,
+                region: None,
             }],
         )]);
 

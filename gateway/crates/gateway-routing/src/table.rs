@@ -118,6 +118,12 @@ impl RouteTable {
             if !route.enabled {
                 continue;
             }
+            // Phase 7：生命周期过滤
+            // Draft（草稿）与 Retired（已下线）不对外提供服务；
+            // Deprecated 仍进入路由表，由 Runtime 在响应头标记弃用。
+            if !route.lifecycle.is_servable() {
+                continue;
+            }
             let arc = Arc::new(route.clone());
 
             // Host 处理
@@ -395,6 +401,9 @@ mod tests {
         RouteConfig {
             id: id.into(),
             name: Some(id.into()),
+            // Phase 7：测试使用公共租户 + 已发布状态
+            tenant_id: None,
+            lifecycle: gateway_core::LifecycleStatus::Published,
             enabled: true,
             priority,
             hosts: hosts.iter().map(|s| s.to_string()).collect(),
@@ -412,6 +421,12 @@ mod tests {
             circuit_breaker_policy_id: None,
             cors_policy_id: None,
             path_rewrite: None,
+            // Phase 6 字段：测试中不使用灰度/镜像
+            traffic_split: None,
+            mirror: None,
+            // Phase 7：测试不使用 WAF / 配额
+            waf_policy_id: None,
+            quota_policy_id: None,
             request_transform_id: None,
             response_transform_id: None,
         }

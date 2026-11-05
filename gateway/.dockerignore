@@ -1,0 +1,10 @@
+# 构建上下文排除项：只保留构建必需的源码与清单文件
+target
+.git
+.github
+docs
+*.md
+e2e-test.yaml
+docker-compose.yml
+.dockerignore
+Dockerfile

@@ -25,4 +25,4 @@
 pub mod client;
 pub mod headers;
 
-pub use client::{ProxyClient, ProxyOptions};
+pub use client::{BoxError, ProxyClient, ProxyOptions};

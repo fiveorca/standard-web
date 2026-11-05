@@ -36,15 +36,18 @@ use gateway_config::{load_from_path, validate, CompiledSnapshot, GatewayConfig};
 use gateway_core::UpstreamManager;
 use gateway_network::{HttpServer, ServerOptions};
 use gateway_observability::init_logging;
+use gateway_plugin::{PluginContext, PluginDecision, PluginPhase, PluginResponse};
 use gateway_proxy::{ProxyClient, ProxyOptions};
 
+use http::header::HeaderValue;
 use http::{Request, Response, StatusCode};
+use http_body_util::Full;
 use hyper::body::Incoming;
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use crate::body::{self, ResBody};
-use crate::state::{SnapshotApplyError, SnapshotStore};
+use crate::body::{self, boxed, ResBody};
+use crate::state::{SnapshotApplyError, SnapshotStore, INITIAL_CONFIG_VERSION};
 
 // ---------------------------------------------------------------------------
 // Runtime 结构体
@@ -71,6 +74,13 @@ pub struct Runtime {
     snapshots: Arc<SnapshotStore>,
     /// 反向代理客户端：hyper Client 实例（连接池在 hyper 内部管理）
     proxy_client: Arc<ProxyClient>,
+    /// Bulkhead 并发限制信号量。超过 max_concurrent_requests
+    /// 时 try_acquire_owned() 失败，handle_request 立即返回 503，不阻塞排队。
+    /// permit 在请求处理完成（函数返回）时自动 drop 释放。
+    bulkhead: Arc<tokio::sync::Semaphore>,
+    /// 最大请求体大小（字节）。Content-Length 超过此值时返回 413。
+    /// Chunked transfer-encoding（无 Content-Length）场景下无法提前拦截。
+    max_body_size: u64,
 }
 
 impl Runtime {
@@ -114,9 +124,18 @@ impl Runtime {
         init_logging(&cfg.observability.logging.level, &cfg.observability.logging.format);
 
         // 构建初始配置快照：编译路由表 + 上游注册表 + Service 映射，
-        // 后续热更新通过 SnapshotStore::apply 原子替换
+        // 后续热更新通过 SnapshotStore::apply 原子替换。
+        //
+        // 控制面模式下本地 YAML 只是引导配置，版本号置 0，避免与控制面
+        // 的版本空间（从 1 开始）冲突导致首个快照被判为 stale。
+        let initial_version = if cfg.control_plane.enabled {
+            0
+        } else {
+            INITIAL_CONFIG_VERSION
+        };
         let snapshots = Arc::new(
-            SnapshotStore::from_config(&cfg).map_err(|e| vec![e])?,
+            SnapshotStore::from_config_with_version(&cfg, initial_version)
+                .map_err(|e| vec![e])?,
         );
         tracing::info!(
             target: "runtime",
@@ -133,10 +152,21 @@ impl Runtime {
             connect_timeout: Duration::from_secs(5),
         }));
 
+        // Bulkhead：用 RuntimeConfig.max_concurrent_requests 初始化
+        // Semaphore 大小；Arc 让多线程（handle_request 被 hyper service_fn 调用）
+        // 共享同一个限流槽位池
+        let bulkhead = Arc::new(tokio::sync::Semaphore::new(
+            cfg.runtime.max_concurrent_requests as usize,
+        ));
+        // 在 move cfg 到 Self 之前提前取出 max_body_size（避免 move 后再访问）
+        let max_body_size = cfg.runtime.max_request_body_size;
+
         Ok(Self {
             config: cfg,
             snapshots,
             proxy_client,
+            bulkhead,
+            max_body_size,
         })
     }
 
@@ -248,6 +278,13 @@ impl Runtime {
         tracing::info!(target: "runtime", "gateway runtime started");
 
         // =================================================================
+        // 2.5 动态服务发现后台任务（Phase 6）
+        // =================================================================
+        // 对配置了 upstreams[].discovery 的上游定期刷新端点。
+        // 未配置 discovery 时该任务只做空转 tick，开销可忽略。
+        crate::discovery::spawn(rt.snapshots.clone());
+
+        // =================================================================
         // 3. 安装信号处理：SIGTERM/SIGINT → CancellationToken.cancel()
         // =================================================================
 
@@ -308,9 +345,13 @@ impl Runtime {
     ///    保证 request_duration_ms 统计的是完整流式传输时间
     async fn handle_request(
         &self,
-        request: Request<Incoming>,
+        mut request: Request<Incoming>,
     ) -> Result<Response<ResBody>, std::convert::Infallible> {
         use gateway_common::ErrorCode;
+
+        // WebSocket / HTTP Upgrade：在 request 被拆解前取出客户端侧升级句柄。
+        // 普通请求不会触发升级，OnUpgrade 在函数结束时自动丢弃。
+        let client_on_upgrade = hyper::upgrade::on(&mut request);
 
         // -----------------------------------------------------------------
         // 1. 请求上下文初始化
@@ -320,8 +361,74 @@ impl Runtime {
         let request_id = RequestId::new();
         let mut ctx = gateway_core::RequestContext::new(request_id);
 
+        // -----------------------------------------------------------------
+        // Bulkhead + 请求体大小限制（业务层入口限流 + 安全拦截）
+        // -----------------------------------------------------------------
+        // 在拆 parts/body 之前先做两类检查：
+        // 1. Bulkhead try_acquire_owned——并发槽位耗尽立即 503，不阻塞
+        // 2. Content-Length 超过 max_body_size 立即 413——超大体量请求在 header
+        //    层面就被拦截，Incoming body 不进入后续插件链/路由匹配
+        // permit 被 move 到函数作用域末尾 drop——请求处理完自动释放槽位
+        //
+        // 为什么在拆 parts 之前做？因为 Content-Length 在 Request 上可见，
+        // Request 本身不需要拆 parts 就能拿到 headers
+        let _bulkhead_permit = match self.bulkhead.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_sem_err) => {
+                // 超过并发上限 → 立即 503，不排队
+                tracing::warn!(
+                    target: "runtime",
+                    request_id = %ctx.request_id,
+                    "bulkhead reject: max concurrent requests reached"
+                );
+                ctx.finish_with_error(
+                    ErrorCode::GatewayResourceExhausted.as_str().to_string(),
+                    "server overloaded".to_string(),
+                );
+                let resp = body::error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorCode::GatewayResourceExhausted.as_str(),
+                    "server overloaded (bulkhead full)",
+                    ctx.request_id.as_str(),
+                );
+                return Ok(resp);
+            },
+        };
+
+        // max_request_body_size：Content-Length 头超过限制 → 413
+        // Chunked transfer-encoding（无 Content-Length）无法提前拦截，
+        // 留给下游 Incoming body 实际读取时（暂未实现流式限流）
+        if let Some(cl) = request.headers().get("content-length") {
+            if let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<u64>().ok()) {
+                if len > self.max_body_size {
+                    tracing::warn!(
+                        target: "runtime",
+                        request_id = %ctx.request_id,
+                        content_length = len,
+                        max_allowed = self.max_body_size,
+                        "request body exceeds size limit"
+                    );
+                    ctx.finish_with_error(
+                        ErrorCode::GatewayRequestTooLarge.as_str().to_string(),
+                        "request body exceeds max size limit".to_string(),
+                    );
+                    let resp = body::error_response(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        ErrorCode::GatewayRequestTooLarge.as_str(),
+                        &format!(
+                            "request body size {} exceeds limit {}",
+                            len, self.max_body_size
+                        ),
+                        ctx.request_id.as_str(),
+                    );
+                    return Ok(resp);
+                }
+            }
+        }
+
         // 拆开请求 Parts（method/uri/headers/extensions） 和 Body
-        let (parts, body) = request.into_parts();
+        // parts 必须是 mut：插件链会修改 headers（request_transform 注入代理链头等）
+        let (mut parts, body) = request.into_parts();
         let method = parts.method.clone();
         let uri = parts.uri.clone();
         let headers = parts.headers.clone();
@@ -370,18 +477,127 @@ impl Runtime {
             gateway_routing::MatchResult::Matched(route) => {
                 ctx.set_route(route.clone());
 
-                // Route → Service → Upstream 引用解析：
-                // Route 引用的是 service_id，而 UpstreamRegistry 以 upstream_id
-                // 为键，先查 service_upstreams 映射表拿到 upstream_id。
-                // validate() 已保证引用完整，查不到属于内部错误 → 500。
-                let upstream_id = state.service_upstreams.get(&route.service_id).cloned();
+                // ============================================================
+                // Phase 2 插件链（请求方向）
+                // ============================================================
+                // 设计文档 4.12：插件按阶段串行执行，短路立即返回。
+                // 关键安全保证：认证阶段返回 ShortCircuit(401/403) 时，
+                // 不会进入后续的 Service→Upstream→ProxyClient 路径——
+                // 认证失败的请求绝对访问不到上游。
+
+                // Stage 1: RequestPostRoute —— rate_limit（429 短路）+ cors_request（OPTIONS 预检 204/403/405）
+                // 插件按 (priority, name) 升序执行；空链 run() 直接返回 Continue
+                let mut pctx = PluginContext::new(
+                    &mut parts,
+                    &mut ctx,
+                    Some(route.clone()),
+                    None,
+                );
+                match state.chain(PluginPhase::RequestPostRoute).run(&mut pctx).await {
+                    Ok(PluginDecision::Continue) => {},
+                    Ok(PluginDecision::ShortCircuit(resp)) => {
+                        // 插件短路：请求被拦截（如限流、OPTIONS 预检直接响应）
+                        ctx.finish_with_error(
+                            "GATEWAY_PLUGIN_SHORT_CIRCUIT".to_string(),
+                            "request rejected by plugin".to_string(),
+                        );
+                        let short_circuit_code = resp.status.as_u16();
+                        let final_resp = plugin_response_to_response(resp);
+                        ctx.status_code = Some(short_circuit_code);
+                        return Ok(body::observe(final_resp, ctx));
+                    },
+                    Err(plugin_err) => {
+                        // 插件内部故障 → fail closed → 500
+                        tracing::error!(target: "plugin", error = %plugin_err, "plugin error in request_post_route");
+                        let final_resp = plugin_error_to_response(
+                            plugin_err,
+                            ctx.request_id.as_str(),
+                        );
+                        ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+                        return Ok(body::observe(final_resp, ctx));
+                    },
+                }
+                // pctx 在此块结束时 Drop，parts/ctx 的可变借用释放，
+                // 下一个阶段可以重新构造 PluginContext 继续使用
+
+                // Stage 2: Authentication —— auth（JWT/API Key/Basic/IP 过滤 → 401/403 短路）
+                let mut pctx = PluginContext::new(
+                    &mut parts,
+                    &mut ctx,
+                    Some(route.clone()),
+                    None,
+                );
+                match state.chain(PluginPhase::Authentication).run(&mut pctx).await {
+                    Ok(PluginDecision::Continue) => {},
+                    Ok(PluginDecision::ShortCircuit(resp)) => {
+                        // 认证失败短路：核心安全保证——不允许认证失败的请求访问上游
+                        ctx.finish_with_error(
+                            "GATEWAY_AUTHENTICATION_FAILED".to_string(),
+                            "authentication denied".to_string(),
+                        );
+                        let short_circuit_code = resp.status.as_u16();
+                        let final_resp = plugin_response_to_response(resp);
+                        ctx.status_code = Some(short_circuit_code);
+                        return Ok(body::observe(final_resp, ctx));
+                    },
+                    Err(plugin_err) => {
+                        tracing::error!(target: "plugin", error = %plugin_err, "plugin error in authentication");
+                        let final_resp = plugin_error_to_response(
+                            plugin_err,
+                            ctx.request_id.as_str(),
+                        );
+                        ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+                        return Ok(body::observe(final_resp, ctx));
+                    },
+                }
+
+                // Stage 3: RequestPreUpstream —— request_transform（改写 headers）+ circuit_breaker_guard（熔断拦截）
+                let mut pctx = PluginContext::new(
+                    &mut parts,
+                    &mut ctx,
+                    Some(route.clone()),
+                    None,
+                );
+                match state.chain(PluginPhase::RequestPreUpstream).run(&mut pctx).await {
+                    Ok(PluginDecision::Continue) => {},
+                    Ok(PluginDecision::ShortCircuit(resp)) => {
+                        ctx.finish_with_error(
+                            "GATEWAY_PLUGIN_SHORT_CIRCUIT".to_string(),
+                            "request rejected by plugin before upstream".to_string(),
+                        );
+                        let short_circuit_code = resp.status.as_u16();
+                        let final_resp = plugin_response_to_response(resp);
+                        ctx.status_code = Some(short_circuit_code);
+                        return Ok(body::observe(final_resp, ctx));
+                    },
+                    Err(plugin_err) => {
+                        tracing::error!(target: "plugin", error = %plugin_err, "plugin error in request_pre_upstream");
+                        let final_resp = plugin_error_to_response(
+                            plugin_err,
+                            ctx.request_id.as_str(),
+                        );
+                        ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+                        return Ok(body::observe(final_resp, ctx));
+                    },
+                }
+
+                // ============================================================
+                // 继续：选上游 + 转发（原有逻辑）
+                // ============================================================
+                // 到这里 parts 可能已被 request_transform 改写（加了/改了请求头），
+                // ctx 可能已被 auth 插件写入 identity。后续 ProxyClient 会
+                // 使用这个被修改过的 parts，保证插件链的改动真实生效。
+                // 灰度 / 蓝绿 / 加权路由：按 traffic_split 权重选择目标 Service，
+                // 未配置时退化为 route.service_id
+                let effective_service_id = select_service_target(&route);
+                let upstream_id = state.service_upstreams.get(&effective_service_id).cloned();
 
                 match upstream_id {
                     // Service → Upstream 映射缺失（配置内部错误）→ 500
                     None => {
                         let msg = format!(
                             "service '{}' has no upstream mapping (config bug)",
-                            route.service_id
+                            effective_service_id
                         );
                         ctx.finish_with_error(
                             ErrorCode::GatewayInternalError.as_str().to_string(),
@@ -394,32 +610,354 @@ impl Runtime {
                         )
                     },
                     Some(upstream_id) => {
-                        // 从 UpstreamRegistry 选出一个健康实例（Round-Robin 算法）
-                        match state.upstream_registry.pick_endpoint(&upstream_id).await {
-                            Ok(endpoint) => {
-                                ctx.set_endpoint(endpoint.clone());
-                                ctx.mark_upstream_start();
+                        // =================================================================
+                        // Retry 策略预处理（幂等方法 + retry_policy_id）
+                        // =================================================================
+                        // Retry 安全边界：
+                        // - 只做 "endpoint selection 层" 的重试（pick_endpoint 失败时
+                        //   换健康实例重试）——Incoming body 不可重播，forward 失败后
+                        //   不能安全重试（设计文档 4.6："不允许不安全重试"）
+                        // - 非幂等方法也不允许重试（即使 endpoint selection 层）
+                        // - retry policy 只在 max_attempts > 1 时启用，默认 1
+                        let method_upper = parts.method.as_str().to_ascii_uppercase();
+                        let is_idempotent = matches!(method_upper.as_str(), "GET" | "HEAD" | "PUT" | "DELETE");
+                        let retry_policy = route
+                            .retry_policy_id
+                            .as_deref()
+                            .and_then(|id| state.retries.get(id))
+                            .filter(|p| p.enabled && is_idempotent);
+                        let max_attempts = retry_policy.map(|p| p.max_attempts.max(1)).unwrap_or(1);
 
-                                // 构造转发请求：原 Parts + 原 Body（流式，不收集）。
-                                // ProxyClient::forward 内部会把 URI 覆盖为真实上游地址，
-                                // 并注入 X-Forwarded-For 等代理链头
-                                let upstream_req = http::Request::from_parts(parts, body);
+                        // 计算 per-request 超时（从 Route → state.timeouts 查）
+                        let per_timeout = route
+                            .timeout_policy_id
+                            .as_deref()
+                            .and_then(|id| state.timeouts.get(id).copied());
 
-                                match self
-                                    .proxy_client
-                                    .forward(upstream_req, &endpoint, &path, client_ip)
+                        // 在任何 move 之前 clone 一份 parts 给响应方向插件用
+                        // （响应方向插件如 cors_response 要读 Origin 请求头）
+                        let mut parts_for_response = parts.clone();
+
+                        // =================================================================
+                        // X-Request-Id 注入（Phase 2 核心——请求 ID 透传到上游）
+                        // =================================================================
+                        // 设计文档 4.10：网关生成的 request_id 必须透传到上游，
+                        // 让后端可以在日志 / trace 里关联请求。
+                        // - 如果 parts 里已经有 X-Request-Id（客户端自己传的），保留原值
+                        // - 没有则注入网关生成的 ctx.request_id
+                        // - 同时注入 X-Request-ID（大写，有些上游规范用这个）
+                        if !parts.headers.contains_key("x-request-id") {
+                            // HeaderValue::from_str 不允许 NUL/CRLF；网关生成的
+                            // request_id 是 UUID（无特殊字符），理论上不会失败。
+                            // 用 match 代替 expect 保证无 unwrap。
+                            if let Ok(rv) = HeaderValue::from_str(ctx.request_id.as_str()) {
+                                parts.headers.insert("x-request-id", rv.clone());
+                                parts.headers.insert("X-Request-Id", rv);
+                            } else {
+                                tracing::warn!(
+                                    target: "runtime",
+                                    request_id = %ctx.request_id,
+                                    "generated request_id failed HeaderValue conversion (unexpected)"
+                                );
+                            }
+                        }
+
+                        // =================================================================
+                        // Pick Endpoint Retry Loop + Forward
+                        // =================================================================
+                        // 会话键：优先 X-Client-Zone（区域感知），
+                        // 否则退化为客户端 IP（IP Hash / 一致性哈希）。
+                        let session_key: Option<String> = parts
+                            .headers
+                            .get("x-client-zone")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string)
+                            .or_else(|| client_ip.map(|ip| ip.to_string()));
+
+                        let mut endpoint: Option<gateway_core::Endpoint> = None;
+
+                        // 重试选 endpoint：第一次选不到健康实例时，按 retry policy
+                        // 退避等待后再选（最多 max_attempts 次）
+                        for attempt in 1..=max_attempts {
+                            match state
+                                .upstream_registry
+                                .pick_endpoint_with_key(&upstream_id, session_key.as_deref())
+                                .await
+                            {
+                                Ok(ep) => {
+                                    endpoint = Some(ep);
+                                    break;
+                                },
+                                Err(_pick_err) => {
+                                    // 还有 retry 机会 → 退避等待后重选
+                                    if attempt < max_attempts {
+                                        let delay = retry_policy
+                                            .map(|p| p.retry_delay(attempt))
+                                            .unwrap_or(std::time::Duration::ZERO);
+                                        tracing::warn!(
+                                            target: "runtime",
+                                            retry_attempt = attempt,
+                                            retry_max = max_attempts,
+                                            retry_backoff_ms = delay.as_millis() as u64,
+                                            upstream_id = %upstream_id,
+                                            "endpoint not available, retrying"
+                                        );
+                                        tokio::time::sleep(delay).await;
+                                        continue;
+                                    }
+                                    // 最后一次也选不到 → 直接走 503
+                                    let msg = format!(
+                                        "upstream {upstream_id} has no healthy endpoints (after {max_attempts} attempts)"
+                                    );
+                                    ctx.finish_with_error(
+                                        ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
+                                        msg.clone(),
+                                    );
+                                    let status_code = StatusCode::SERVICE_UNAVAILABLE;
+                                    let error_code_str =
+                                        ErrorCode::GatewayUpstreamUnavailable.as_str().to_string();
+                                    let error_msg = msg;
+                                    ctx.status_code = Some(status_code.as_u16());
+                                    let resp = body::error_response(
+                                        status_code,
+                                        &error_code_str,
+                                        &error_msg,
+                                        ctx.request_id.as_str(),
+                                    );
+                                    return Ok(body::observe(resp, ctx));
+                                },
+                            }
+                        }
+
+                        // 保证 endpoint 一定是 Some（如果是 None 说明 max_attempts=0 或逻辑 bug）
+                        // 这种情况兜底 503，绝不能崩溃
+                        let endpoint = match endpoint {
+                            Some(ep) => ep,
+                            None => {
+                                tracing::error!(
+                                    target: "runtime",
+                                    "pick endpoint retry loop produced no endpoint (logic bug)"
+                                );
+                                let msg = format!(
+                                    "upstream {upstream_id} has no healthy endpoints"
+                                );
+                                ctx.finish_with_error(
+                                    ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
+                                    msg.clone(),
+                                );
+                                let resp = body::error_response(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    ErrorCode::GatewayUpstreamUnavailable.as_str(),
+                                    &msg,
+                                    ctx.request_id.as_str(),
+                                );
+                                return Ok(body::observe(resp, ctx));
+                            }
+                        };
+
+                        ctx.set_endpoint(endpoint.clone());
+                        ctx.mark_upstream_start();
+
+                        // =================================================================
+                        // 流量镜像（Phase 6）
+                        // =================================================================
+                        // 位置约束：必须在认证阶段之后、转发之前。认证失败的请求
+                        // 已在更早阶段短路返回，不会走到这里，也就不会被镜像。
+                        //
+                        // 采样命中后：
+                        //   1. 用 TeeBody 把请求体分叉（Bytes 克隆，不复制内存）
+                        //   2. 主请求继续走原路径（此处改用 BoxBody 擦除客户端）
+                        //   3. 影子请求在独立 task 中异步发送，失败只记日志
+                        let mirror_shadow_service: Option<String> = route.mirror.as_ref().and_then(|m| {
+                            if !crate::mirror::sampled(m.percentage) {
+                                return None;
+                            }
+                            Some(m.service_id.clone())
+                        });
+
+                        // Least Connections：转发前占用端点，响应头返回后释放
+                        state
+                            .upstream_registry
+                            .on_connection_start(&upstream_id, &endpoint.runtime_id);
+
+                        let forward_result = if let Some(shadow_service_id) = mirror_shadow_service {
+                            // ---- 有镜像：主/影子共享同一份 tee 出来的请求体 ----
+                            let (main_body, shadow_body) = crate::mirror::tee(body);
+                            let main_req = http::Request::from_parts(
+                                parts,
+                                crate::mirror::boxed_tee(main_body),
+                            );
+                            // 影子请求使用与主请求相同的 parts（认证后的最终请求头）
+                            let shadow_req = http::Request::from_parts(
+                                parts_for_response.clone(),
+                                crate::mirror::boxed_channel(shadow_body),
+                            );
+
+                            let state_for_mirror = state.clone();
+                            let proxy_for_mirror = self.proxy_client.clone();
+                            let shadow_path = path.clone();
+                            let request_id = ctx.request_id.to_string();
+                            // 影子任务独立 spawn：镜像永远不阻塞主请求
+                            tokio::spawn(async move {
+                                match state_for_mirror
+                                    .upstream_registry
+                                    .pick_endpoint_with_key(&shadow_service_id, None)
                                     .await
                                 {
+                                    Ok(shadow_endpoint) => {
+                                        crate::mirror::send_shadow(
+                                            proxy_for_mirror,
+                                            shadow_req,
+                                            shadow_endpoint,
+                                            shadow_path,
+                                            client_ip,
+                                            per_timeout,
+                                            request_id,
+                                        )
+                                        .await;
+                                    },
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            target: "mirror",
+                                            request_id = %request_id,
+                                            shadow_service = %shadow_service_id,
+                                            error = %err,
+                                            "mirror skipped: no shadow endpoint"
+                                        );
+                                    },
+                                }
+                            });
+
+                            self.proxy_client
+                                .forward_boxed(main_req, &endpoint, &path, client_ip, per_timeout)
+                                .await
+                        } else {
+                            // ---- 无镜像：原路径，Incoming 直接流式透传 ----
+                            let upstream_req = http::Request::from_parts(parts, body);
+                            self.proxy_client
+                                .forward(upstream_req, &endpoint, &path, client_ip, per_timeout)
+                                .await
+                        };
+
+                        // 响应头/错误返回即释放占用（流式 body 继续传输不阻塞选择）
+                        state
+                            .upstream_registry
+                            .on_connection_end(&upstream_id, &endpoint.runtime_id);
+
+                        match forward_result
+                        {
                                     // 上游返回任何 HTTP 响应（2xx/3xx/4xx/5xx）都算"代理成功"——
                                     // 我们只透传，不解释业务语义
-                                    Ok(upstream_resp) => {
-                                        let status = upstream_resp.status().as_u16();
-                                        // 记录"上游响应头到达"时间点
-                                        // （upstream_duration_ms 统计口径：发起上游请求 → 首包到达）
+                                    Ok(mut upstream_resp) => {
                                         ctx.mark_upstream_headers();
-                                        // 状态码现在写入 ctx；request_end 由 ObservedBody
+
+                                        // WebSocket / HTTP Upgrade：上游返回 101 时，
+                                        // 把客户端与上游两条已升级的连接桥接起来，
+                                        // 之后的双向帧透传由 copy_bidirectional 完成。
+                                        if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+                                            let upstream_on_upgrade =
+                                                hyper::upgrade::on(&mut upstream_resp);
+                                            tokio::spawn(bridge_upgrade(client_on_upgrade, upstream_on_upgrade));
+                                        }
+
+                                        // 构造响应方向插件可见的 ResponseParts 视图
+                                        // （status + headers 是可写副本；body 不暴露给插件，
+                                        // 保持 Incoming 流式透传零拷贝）
+                                        let mut response_parts = gateway_plugin::ResponseParts::new(
+                                            upstream_resp.status(),
+                                            upstream_resp.headers().clone(),
+                                        );
+
+                                        // Stage 4: UpstreamResponse —— circuit_breaker_record（熔断结果记账）
+                                        // 此阶段插件只做"观测/记账"，理论上不应短路；
+                                        // 若插件短路则直接返回短路响应（极端场景）
+                                        {
+                                            let mut pctx = PluginContext::new(
+                                                &mut parts_for_response,
+                                                &mut ctx,
+                                                Some(route.clone()),
+                                                Some(&mut response_parts),
+                                            );
+                                            match state
+                                                .chain(PluginPhase::UpstreamResponse)
+                                                .run(&mut pctx)
+                                                .await
+                                            {
+                                                Ok(PluginDecision::Continue) => {},
+                                                Ok(PluginDecision::ShortCircuit(resp)) => {
+                                                    // 罕见：插件决定吞掉上游响应自己返回
+                                                    let final_resp = plugin_response_to_response(resp);
+                                                    ctx.status_code = Some(final_resp.status().as_u16());
+                                                    return Ok(body::observe(final_resp, ctx));
+                                                },
+                                                Err(plugin_err) => {
+                                                    tracing::error!(target: "plugin", error = %plugin_err, "plugin error in upstream_response");
+                                                    let final_resp = plugin_error_to_response(
+                                                        plugin_err,
+                                                        ctx.request_id.as_str(),
+                                                    );
+                                                    ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+                                                    return Ok(body::observe(final_resp, ctx));
+                                                },
+                                            }
+                                        }
+
+                                        // Stage 5: ResponsePreClient —— response_transform（改写响应头）+ cors_response（追加 CORS 头）
+                                        // 此阶段插件主要修改 response_parts.headers，例如：
+                                        //   - response_transform：注入自定义响应头、删除敏感头
+                                        //   - cors_response：追加 Access-Control-Allow-Origin / Allow-Credentials / Expose-Headers / Vary
+                                        {
+                                            let mut pctx = PluginContext::new(
+                                                &mut parts_for_response,
+                                                &mut ctx,
+                                                Some(route.clone()),
+                                                Some(&mut response_parts),
+                                            );
+                                            match state
+                                                .chain(PluginPhase::ResponsePreClient)
+                                                .run(&mut pctx)
+                                                .await
+                                            {
+                                                Ok(PluginDecision::Continue) => {},
+                                                Ok(PluginDecision::ShortCircuit(resp)) => {
+                                                    let final_resp = plugin_response_to_response(resp);
+                                                    ctx.status_code = Some(final_resp.status().as_u16());
+                                                    return Ok(body::observe(final_resp, ctx));
+                                                },
+                                                Err(plugin_err) => {
+                                                    tracing::error!(target: "plugin", error = %plugin_err, "plugin error in response_pre_client");
+                                                    let final_resp = plugin_error_to_response(
+                                                        plugin_err,
+                                                        ctx.request_id.as_str(),
+                                                    );
+                                                    ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+                                                    return Ok(body::observe(final_resp, ctx));
+                                                },
+                                            }
+                                        }
+
+                                        // 把插件修改后的 status / headers 原地写回 upstream_resp
+                                        // ResponseParts::status / headers 都是插件可写的，
+                                        // upstream_resp 的 Incoming body 保持不变，继续流式透传
+                                        *upstream_resp.status_mut() = response_parts.status;
+                                        *upstream_resp.headers_mut() = response_parts.headers;
+
+                                        // Phase 7：已废弃 API 的弃用标记（RFC 8594）
+                                        if route.lifecycle == gateway_core::LifecycleStatus::Deprecated {
+                                            upstream_resp.headers_mut().insert(
+                                                "deprecation",
+                                                HeaderValue::from_static("true"),
+                                            );
+                                            // 中文语义的附加头，便于非标准客户端识别
+                                            upstream_resp.headers_mut().insert(
+                                                "x-api-deprecated",
+                                                HeaderValue::from_static("true"),
+                                            );
+                                        }
+
+                                        // 状态码写入 ctx；request_end 由 ObservedBody
                                         // 在 body 流结束/断开时写入，保证总耗时统计准确
-                                        ctx.status_code = Some(status);
+                                        ctx.status_code = Some(response_parts.status.as_u16());
 
                                         // 流式透传（P2.0 核心）：
                                         //   Incoming --body::boxed()--> BoxBody<Bytes, BoxError>
@@ -442,22 +980,6 @@ impl Runtime {
                                         )
                                     },
                                 }
-                            },
-                            // 没有健康端点 → 503
-                            Err(_pick_err) => {
-                                let msg =
-                                    format!("upstream {upstream_id} has no healthy endpoints");
-                                ctx.finish_with_error(
-                                    ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
-                                    msg.clone(),
-                                );
-                                (
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
-                                    msg,
-                                )
-                            },
-                        }
                     },
                 }
             },
@@ -531,6 +1053,21 @@ impl Runtime {
         self.config.server.admin.enabled
     }
 
+    /// Prometheus Metrics 端点是否启用（observability.metrics.enabled）。
+    pub fn metrics_enabled(&self) -> bool {
+        self.config.observability.metrics.enabled
+    }
+
+    /// Metrics 端点的路径（observability.metrics.path，默认 `/metrics`）。
+    pub fn metrics_path(&self) -> &str {
+        &self.config.observability.metrics.path
+    }
+
+    /// 控制面连接配置（数据面 gRPC 同步任务使用）。
+    pub fn control_plane(&self) -> &gateway_config::config::ControlPlaneConfig {
+        &self.config.control_plane
+    }
+
     /// 配置版本号（YAML 启动为 1；控制面发布后随快照递增）
     pub fn config_version(&self) -> u64 {
         self.snapshots.config_version()
@@ -555,6 +1092,116 @@ impl Runtime {
         snapshot: &CompiledSnapshot,
     ) -> Result<u64, SnapshotApplyError> {
         self.snapshots.apply(snapshot)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 插件响应辅助函数（runtime.rs 内部使用）
+// ---------------------------------------------------------------------------
+
+/// 把插件短路时返回的纯数据 [`PluginResponse`] 转成真正的 HTTP [`Response`]。
+///
+/// # 为什么需要这个转换
+/// `PluginResponse` 是插件层与 runtime 之间的"纯数据"接口——它不依赖具体 body 类型
+/// （只持有 `Bytes`），也不依赖 `hyper`。runtime 接到它后要转成 `Response<ResBody>`，
+/// 因为 hyper server handler 必须返回 `Response<ResBody>`。
+///
+/// # 无 unwrap 设计
+/// - `Response::new(body)` 直接构造（无 builder），无失败分支；
+/// - `HeaderValue::from_bytes` 可能失败（非法字节如 NUL/CRLF），
+///   失败时跳过该头——插件写非法头属于插件 bug，不能让网关崩溃。
+/// - `body` 是 `Bytes`（已完整缓冲），`Full::new(body)` 无失败。
+fn plugin_response_to_response(resp: PluginResponse) -> Response<ResBody> {
+    // 构造带内存 body 的响应（插件短路 body 通常很小，如 JWT 错误 JSON）
+    let mut response = Response::new(boxed(Full::new(resp.body)));
+    *response.status_mut() = resp.status;
+
+    // 逐头写入：非法字节跳过，不让 panic 影响网关
+    for (name, value) in resp.headers.iter() {
+        if let Ok(hv) = HeaderValue::from_bytes(value.as_bytes()) {
+            response.headers_mut().insert(name.clone(), hv);
+        }
+    }
+    response
+}
+
+/// 把插件内部故障错误转成 500 响应（fail closed）。
+///
+/// 插件返回 `Err(PluginError)` 表示系统故障（存储故障/内部不一致），
+/// 不是预期业务结果。fail closed 映射为 500，而不是放行——
+/// 这是设计文档 4.12 的安全约束："插件层不允许静默降级"。
+///
+/// # 参数
+/// - `plugin_err`：插件层错误
+/// - `request_id`：当前请求 ID（用于错误响应 JSON 中的关联字段）
+fn plugin_error_to_response(
+    plugin_err: gateway_plugin::PluginError,
+    request_id: &str,
+) -> Response<ResBody> {
+    // PluginError::to_gateway_error() 已把 ExecutionFailed / Timeout 映射为
+    // GatewayError::Internal，后者的 code() 是 GATEWAY_INTERNAL_ERROR
+    let gw_err = plugin_err.to_gateway_error();
+    body::error_response(
+        gw_err.code().to_http_status(),
+        gw_err.code().as_str(),
+        &gw_err.to_string(),
+        request_id,
+    )
+}
+
+/// 按 `traffic_split` 权重选择目标 Service（Phase 6）。
+///
+/// 使用全局轮询计数器做确定性加权分发：
+///   - 便于测试（同一序列可复现分流比例）
+///   - 避免引入随机数依赖
+///
+/// 未配置 traffic_split 或所有权重为 0 时回退到 `route.service_id`。
+fn select_service_target(route: &gateway_core::RouteConfig) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // 进程级计数器：所有 Route 共享。它只影响分配节奏，不影响正确性。
+    static SPLIT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let Some(split) = route.traffic_split.as_ref() else {
+        return route.service_id.clone();
+    };
+
+    let targets: Vec<&gateway_core::TrafficTarget> =
+        split.targets.iter().filter(|t| t.weight > 0).collect();
+    if targets.is_empty() {
+        return route.service_id.clone();
+    }
+
+    let total: u64 = targets.iter().map(|t| u64::from(t.weight)).sum();
+    if total == 0 {
+        return route.service_id.clone();
+    }
+
+    let pos = SPLIT_COUNTER.fetch_add(1, Ordering::Relaxed) % total;
+    let mut accum: u64 = 0;
+    for target in targets {
+        accum += u64::from(target.weight);
+        if pos < accum {
+            return target.service_id.clone();
+        }
+    }
+
+    route.service_id.clone()
+}
+
+/// 桥接 WebSocket / HTTP Upgrade 双方连接，直到任一端关闭。
+async fn bridge_upgrade(client: hyper::upgrade::OnUpgrade, upstream: hyper::upgrade::OnUpgrade) {
+    match tokio::try_join!(client, upstream) {
+        Ok((client_io, upstream_io)) => {
+            // TokioIo 把 hyper 的 Upgraded（实现 hyper::rt::Read/Write）
+            // 适配成 tokio::io::{AsyncRead, AsyncWrite}
+            let mut client_io = hyper_util::rt::TokioIo::new(client_io);
+            let mut upstream_io = hyper_util::rt::TokioIo::new(upstream_io);
+            if let Err(err) = tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await {
+                tracing::debug!(error = %err, "upgraded connection closed");
+            }
+        },
+        Err(err) => tracing::debug!(error = %err, "connection upgrade failed"),
     }
 }
 

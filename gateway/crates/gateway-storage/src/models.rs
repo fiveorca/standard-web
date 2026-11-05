@@ -62,6 +62,19 @@ pub enum ResourceKind {
     Plugin,
     /// 插件配置
     PluginConfig,
+    // ---- Phase 7：平台化资源 ---- //
+    /// 租户（多租户隔离）
+    Tenant,
+    /// TLS 证书
+    Certificate,
+    /// OpenAPI 规范文档（导入源）
+    ApiSpec,
+    /// WAF 策略
+    WafPolicy,
+    /// 配额策略
+    QuotaPolicy,
+    /// 集群（多集群 / 多地域）
+    Cluster,
 }
 
 impl ResourceKind {
@@ -86,6 +99,13 @@ impl ResourceKind {
             Self::ResponseTransformPolicy => "response-transform-policies",
             Self::Plugin => "plugins",
             Self::PluginConfig => "plugin-configs",
+            // Phase 7 资源
+            Self::Tenant => "tenants",
+            Self::Certificate => "certificates",
+            Self::ApiSpec => "api-specs",
+            Self::WafPolicy => "waf-policies",
+            Self::QuotaPolicy => "quota-policies",
+            Self::Cluster => "clusters",
         }
     }
 
@@ -110,6 +130,13 @@ impl ResourceKind {
             Self::ResponseTransformPolicy => "response_transform_policies",
             Self::Plugin => "plugins",
             Self::PluginConfig => "plugin_configs",
+            // Phase 7 资源
+            Self::Tenant => "tenants",
+            Self::Certificate => "certificates",
+            Self::ApiSpec => "api_specs",
+            Self::WafPolicy => "waf_policies",
+            Self::QuotaPolicy => "quota_policies",
+            Self::Cluster => "clusters",
         }
     }
 
@@ -133,13 +160,20 @@ impl ResourceKind {
             "response-transform-policies" => Self::ResponseTransformPolicy,
             "plugins" => Self::Plugin,
             "plugin-configs" => Self::PluginConfig,
+            // Phase 7 资源
+            "tenants" => Self::Tenant,
+            "certificates" => Self::Certificate,
+            "api-specs" => Self::ApiSpec,
+            "waf-policies" => Self::WafPolicy,
+            "quota-policies" => Self::QuotaPolicy,
+            "clusters" => Self::Cluster,
             _ => return None,
         };
         Some(kind)
     }
 
     /// 所有资源类型（用于发布时全量加载与启动自检）。
-    pub fn all() -> [Self; 15] {
+    pub fn all() -> [Self; 21] {
         [
             Self::Service,
             Self::Upstream,
@@ -156,6 +190,13 @@ impl ResourceKind {
             Self::ResponseTransformPolicy,
             Self::Plugin,
             Self::PluginConfig,
+            // Phase 7 资源
+            Self::Tenant,
+            Self::Certificate,
+            Self::ApiSpec,
+            Self::WafPolicy,
+            Self::QuotaPolicy,
+            Self::Cluster,
         ]
     }
 }

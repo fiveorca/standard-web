@@ -334,6 +334,13 @@ impl ConfigService {
         let response_transform = self
             .load_typed::<TransformPolicyConfig>(ResourceKind::ResponseTransformPolicy)
             .await?;
+        // Phase 7：WAF 与配额策略
+        let waf = self
+            .load_typed::<gateway_core::WafPolicyConfig>(ResourceKind::WafPolicy)
+            .await?;
+        let quota = self
+            .load_typed::<gateway_core::QuotaPolicyConfig>(ResourceKind::QuotaPolicy)
+            .await?;
 
         Ok(ResourceBundle {
             routes,
@@ -348,6 +355,9 @@ impl ConfigService {
                 cors,
                 request_transform,
                 response_transform,
+                // Phase 7：WAF / 配额策略随配置版本一起发布
+                waf,
+                quota,
             },
         }
         .canonicalized())
@@ -775,6 +785,29 @@ fn validate_payload(
                 .map(|_| ())
                 .map_err(decode_err)
         },
+        // Phase 7：平台资源按强类型解码校验
+        ResourceKind::Tenant => serde_json::from_value::<gateway_core::TenantConfig>(payload.clone())
+            .map(|_| ())
+            .map_err(decode_err),
+        ResourceKind::Certificate => {
+            serde_json::from_value::<gateway_core::CertificateConfig>(payload.clone())
+                .map(|_| ())
+                .map_err(decode_err)
+        },
+        ResourceKind::ApiSpec => serde_json::from_value::<gateway_core::ApiSpecConfig>(payload.clone())
+            .map(|_| ())
+            .map_err(decode_err),
+        ResourceKind::WafPolicy => serde_json::from_value::<gateway_core::WafPolicyConfig>(payload.clone())
+            .map(|_| ())
+            .map_err(decode_err),
+        ResourceKind::QuotaPolicy => {
+            serde_json::from_value::<gateway_core::QuotaPolicyConfig>(payload.clone())
+                .map(|_| ())
+                .map_err(decode_err)
+        },
+        ResourceKind::Cluster => serde_json::from_value::<gateway_core::ClusterConfig>(payload.clone())
+            .map(|_| ())
+            .map_err(decode_err),
         // 消费者 / 凭据 / 插件：Phase 3 只做持久化，结构由后续阶段启用
         ResourceKind::Consumer
         | ResourceKind::ConsumerCredential

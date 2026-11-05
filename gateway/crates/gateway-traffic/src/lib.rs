@@ -41,8 +41,10 @@ pub mod fixed_window;
 pub mod key;
 pub mod plugin;
 pub mod policy;
+pub mod redis_limiter;
 pub mod token_bucket;
 
 // 扁平 re-export
 pub use plugin::{RateLimitPlugin, RATE_LIMIT_PLUGIN_NAME};
 pub use policy::{CompiledRateLimitPolicies, CompiledRateLimitPolicy, RateLimiter};
+pub use redis_limiter::{RateLimitOutcome, RedisLimiter};

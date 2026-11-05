@@ -100,6 +100,14 @@ pub struct PluginContext<'a> {
     pub route: Option<Arc<RouteConfig>>,
     /// 响应方向阶段可写的响应视图；请求方向阶段为 `None`
     pub response: Option<&'a mut ResponseParts>,
+    /// 已缓冲的请求体（Phase 7，仅 WAF 需要检查 body 时由 Runtime 预读）。
+    ///
+    /// Runtime 在以下条件满足时填充：
+    /// - 路由引用的 WAF 策略 `targets` 包含 `body`
+    /// - 请求体未超过 `max_body_bytes`
+    ///
+    /// 其余情况为 `None`，插件绝不能假设它一定存在。
+    pub body: Option<&'a bytes::Bytes>,
 }
 
 impl<'a> PluginContext<'a> {
@@ -121,7 +129,15 @@ impl<'a> PluginContext<'a> {
             ctx,
             route,
             response,
+            // 默认无预读 body；Runtime 按需通过 with_body 填充
+            body: None,
         }
+    }
+
+    /// 附加已缓冲的请求体（WAF body 检查场景）。
+    pub fn with_body(mut self, body: &'a bytes::Bytes) -> Self {
+        self.body = Some(body);
+        self
     }
 
     /// 当前请求 ID（用于错误响应与日志关联）。

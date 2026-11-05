@@ -23,9 +23,16 @@ use std::time::Duration;
 use gateway_common::GatewayError;
 use gateway_core::Endpoint;
 use http::Uri;
+use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
+
+/// 流式请求体统一错误类型（与 gateway-runtime 的 `BoxError` 语义一致）。
+///
+/// 镜像请求需要在运行时把 `Incoming` 与自定义 tee body 擦除成同一种类型，
+/// 这里单独定义避免 gateway-proxy 依赖 gateway-runtime。
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 use crate::headers::{inject_forwarded_headers, strip_hop_by_hop, strip_response_hop_by_hop};
 
@@ -74,10 +81,17 @@ impl Default for ProxyOptions {
 /// 3. `.http1_title_case_headers(true)` —— hyper-util 0.1 要求显式传 bool
 /// 4. `.build(connector)` —— 构造 Client，Body 类型由泛型推断
 pub struct ProxyClient<ReqBody = Incoming> {
-    /// hyper_util::client::legacy::Client
-    /// - 第一个泛型：HttpConnector（TCP 连接器）
-    /// - 第二个泛型：ReqBody（请求体类型，与 ProxyClient 的泛型一致）
+    /// HTTP/1.1 客户端（默认路径）
     client: Client<HttpConnector, ReqBody>,
+    /// HTTP/2 (h2c, prior knowledge) 客户端：gRPC 请求走这里
+    h2_client: Client<HttpConnector, ReqBody>,
+    /// 类型擦除 body 的 HTTP/1.1 客户端。
+    ///
+    /// 流量镜像需要把一个请求体同时喂给主请求与影子请求，
+    /// tee 之后 body 不再是 `Incoming`，只能走 BoxBody 擦除路径。
+    boxed_client: Client<HttpConnector, BoxBody<bytes::Bytes, BoxError>>,
+    /// 类型擦除 body 的 HTTP/2 客户端（镜像 gRPC 请求时使用）。
+    boxed_h2_client: Client<HttpConnector, BoxBody<bytes::Bytes, BoxError>>,
     /// 请求超时等配置
     options: ProxyOptions,
 }
@@ -115,9 +129,77 @@ where
             // http1_title_case_headers：HTTP/1.1 header 名称大小写
             // hyper-util 0.1 版本这个方法需要显式传 bool
             .http1_title_case_headers(true)
-            .build(connector);
+            .build::<_, ReqBody>(connector.clone());
 
-        Self { client, options }
+        // HTTP/2 client：http2_only = 明文 h2c prior knowledge（不做 ALPN 协商）。
+        // 用于透传 gRPC：入站请求版本为 HTTP/2 时改走该 client。
+        let h2_client = Client::builder(TokioExecutor::new())
+            .http2_only(true)
+            .build::<_, ReqBody>(connector.clone());
+
+        // BoxBody 客户端：流量镜像的 tee body 使用类型擦除后的统一 body
+        let boxed_client = Client::builder(TokioExecutor::new())
+            .http1_title_case_headers(true)
+            .build::<_, BoxBody<bytes::Bytes, BoxError>>(connector.clone());
+        let boxed_h2_client = Client::builder(TokioExecutor::new())
+            .http2_only(true)
+            .build::<_, BoxBody<bytes::Bytes, BoxError>>(connector);
+
+        Self { client, h2_client, boxed_client, boxed_h2_client, options }
+    }
+
+    /// 转发一个 body 已类型擦除的请求。
+    ///
+    /// 供流量镜像使用：tee 后的主请求/影子请求 body 都是
+    /// `BoxBody<Bytes, BoxError>`，通过本方法发送。
+    ///
+    /// 语义与 [`ProxyClient::forward`] 完全一致（头清洗、代理链头、超时）。
+    pub async fn forward_boxed(
+        &self,
+        request: http::Request<BoxBody<bytes::Bytes, BoxError>>,
+        endpoint: &Endpoint,
+        upstream_path: &str,
+        client_ip: Option<SocketAddr>,
+        per_request_timeout: Option<Duration>,
+    ) -> Result<http::Response<Incoming>, GatewayError> {
+        // 与 forward 相同的协议判定：HTTP/2 入站走 h2c client
+        let use_h2 = request.version() == http::Version::HTTP_2;
+        let uri_str = format!("http://{}{}", endpoint.address(), upstream_path);
+        let uri: Uri = uri_str
+            .parse()
+            .map_err(|e| GatewayError::Internal(format!("invalid upstream uri: {e}")))?;
+
+        let (mut parts, body) = request.into_parts();
+        // 请求方向 Hop-by-Hop 清洗（保留 Upgrade / TE: trailers 的规则一致）
+        strip_hop_by_hop(&mut parts.headers);
+        parts.headers.remove("host");
+        inject_forwarded_headers(&mut parts.headers, client_ip, "http");
+
+        let mut upstream_req = http::Request::from_parts(parts, body);
+        *upstream_req.uri_mut() = uri;
+
+        let send_future = if use_h2 {
+            self.boxed_h2_client.request(upstream_req)
+        } else {
+            self.boxed_client.request(upstream_req)
+        };
+        let timeout = per_request_timeout.unwrap_or(self.options.request_timeout);
+        match tokio::time::timeout(timeout, send_future).await {
+            Ok(Ok(response)) => {
+                let (mut resp_parts, resp_body) = response.into_parts();
+                strip_response_hop_by_hop(&mut resp_parts.headers);
+                Ok(http::Response::from_parts(resp_parts, resp_body))
+            },
+            Ok(Err(hyper_err)) => Err(GatewayError::UpstreamConnectionError {
+                upstream: endpoint.address(),
+                endpoint: endpoint.address(),
+                reason: hyper_err.to_string(),
+            }),
+            Err(_elapsed) => Err(GatewayError::UpstreamTimeout {
+                upstream: endpoint.address(),
+                endpoint: endpoint.address(),
+            }),
+        }
     }
 
     /// 转发请求到上游端点。
@@ -137,7 +219,12 @@ where
         endpoint: &Endpoint,
         upstream_path: &str,
         client_ip: Option<SocketAddr>,
+        per_request_timeout: Option<Duration>,
     ) -> Result<http::Response<Incoming>, GatewayError> {
+        // 入站为 HTTP/2（gRPC）时，上游也必须用 HTTP/2 发送，
+        // 否则 gRPC 的 trailers 与 `te: trailers` 语义无法透传。
+        let use_h2 = request.version() == http::Version::HTTP_2;
+
         // =================================================================
         // 1. 构造上游 URI
         // =================================================================
@@ -167,10 +254,15 @@ where
         // =================================================================
         // 3. 带超时发送
         // =================================================================
-        // Client::request 返回 ResponseFuture（impl Future<Output = Result<Response<Incoming>, hyper::Error>>）
-        let send_future = self.client.request(upstream_req);
-        // tokio::time::timeout：超过 request_timeout 返回 Err(Elapsed)
-        let result = tokio::time::timeout(self.options.request_timeout, send_future).await;
+        // Client::request 返回 ResponseFuture
+        let send_future = if use_h2 {
+            self.h2_client.request(upstream_req)
+        } else {
+            self.client.request(upstream_req)
+        };
+        // 超时：per-request 覆盖优先，fallback 到 ProxyOptions 的兜底值
+        let timeout = per_request_timeout.unwrap_or(self.options.request_timeout);
+        let result = tokio::time::timeout(timeout, send_future).await;
 
         match result {
             // hyper client 成功返回 Response
@@ -199,7 +291,7 @@ where
             Err(_elapsed) => {
                 tracing::warn!(
                     upstream = endpoint.address(),
-                    timeout_secs = self.options.request_timeout.as_secs(),
+                    timeout_ms = timeout.as_millis() as u64,
                     "upstream request timeout"
                 );
                 Err(GatewayError::UpstreamTimeout {
@@ -260,7 +352,7 @@ mod tests {
         let request = http::Request::builder().method("GET").body(Full::new(Bytes::new())).unwrap();
 
         let response = client
-            .forward(request, &endpoint, "/hello", None)
+            .forward(request, &endpoint, "/hello", None, None)
             .await
             .expect("should succeed");
 
@@ -286,7 +378,7 @@ mod tests {
 
         let request = http::Request::builder().method("GET").body(Full::new(Bytes::new())).unwrap();
 
-        let err = client.forward(request, &endpoint, "/", None).await.expect_err("should fail");
+        let err = client.forward(request, &endpoint, "/", None, None).await.expect_err("should fail");
 
         assert!(matches!(err, GatewayError::UpstreamConnectionError { .. }));
     }

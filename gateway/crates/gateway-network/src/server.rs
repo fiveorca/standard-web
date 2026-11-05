@@ -1,12 +1,23 @@
 //! HttpServer —— Hyper HTTP 服务封装（简化版）。
 //!
-//! Phase 1 只支持 HTTP/1.1。HTTP/2（需要 ALPN + TLS）放到 Phase 2。
+//! 同时支持 HTTP/1.1 与 HTTP/2（h2c，prior knowledge）：
+//! `hyper_util::server::conn::auto` 会在连接建立时自动识别协议，
+//! 因此同一端口可以同时服务 REST（HTTP/1.1）与 gRPC（HTTP/2）。
+//! TLS（ALPN）在 Phase 6 后续的 TLS 监听器中完成。
 //!
-//! # 并发限制
+//! # 并发限制（Bulkhead）
 //!
-//! tokio::sync::Semaphore 做 Bulkhead。超过 max_concurrent_requests
-//! 时 try_acquire 失败，立即返回 503，不阻塞。
-//! Phase 1 暂不启用（注释中保留），Phase 2 gateway-resilience 统一接入。
+//! tokio::sync::Semaphore::try_acquire_owned() 做 Bulkhead。超过
+//! max_concurrent_requests 时立即返回 503（`GATEWAY_BULKHEAD_FULL`），
+//! 不阻塞不排队。每个请求获取一个 permit，处理完自动 drop 释放。
+//! Bulkhead 由调用方（Runtime 层）在 handle_request 入口处执行。
+//!
+//! # 请求体大小限制
+//!
+//! Content-Length 头超过 max_request_body_size 时返回 413
+//! （`GATEWAY_REQUEST_TOO_LARGE`）。在 Runtime 层 handle_request 入口检查。
+//! Chunked transfer-encoding（无 Content-Length）场景无法提前拦截，
+//! 需 runtime 层配合流式读取时做限制。
 //!
 //! # 优雅关闭
 //!
@@ -34,17 +45,15 @@ use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use gateway_common::GatewayError;
 use http::Request;
 use hyper::body::{Body, Incoming};
-use hyper::server::conn::http1;
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 
 // ---------------------------------------------------------------------------
@@ -54,12 +63,11 @@ use hyper_util::service::TowerToHyperService;
 /// HttpServer 构造选项。
 ///
 /// 这些参数在 Runtime 启动时从 GatewayConfig 读取。
-/// Phase 1 中大部分是透传，Phase 2+ 会逐步启用。
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
     /// 最大并发请求数（Bulkhead）。超过时新请求立即 503。
     pub max_concurrent_requests: u32,
-    /// 最大请求体大小（字节）。超过时返回 413。Phase 2 启用。
+    /// 最大请求体大小（字节）。超过时返回 413。
     pub max_request_body_size: u64,
     /// 优雅关闭等待时间（秒）。shutdown 信号收到后最多等这么久。
     pub graceful_shutdown_timeout_secs: u64,
@@ -84,11 +92,15 @@ impl Default for ServerOptions {
 /// # 职责边界
 ///
 /// HttpServer 只做 IO：绑定端口、accept 连接、hyper server 驱动。
-/// 业务逻辑（路由匹配、上游转发、错误处理）通过 `service` 闭包注入。
+/// 业务逻辑（Bulkhead、请求体限制、路由匹配、上游转发、错误处理）
+/// 全部通过 `service` 闭包注入（Runtime 层负责）。
 pub struct HttpServer {
     /// 监听地址（IP + Port），例如 `0.0.0.0:8080`
     addr: SocketAddr,
-    /// 构造选项（并发限制、超时等）
+    /// 构造选项（并发限制、超时等）。
+    /// Bulkhead 和 body limit 已移到 Runtime 层，ServerOptions 保留用于
+    /// 未来扩展（如 TLS 配置、连接 keep-alive 参数等）。
+    #[allow(dead_code)]
     options: ServerOptions,
 }
 
@@ -109,23 +121,7 @@ impl HttpServer {
     ///   即接受一个 hyper server 端的 Request，返回一个 Future。
     /// - `Fut`：handler 返回的 Future 类型。resolve 后必须是
     ///   `Result<http::Response<ResBody>, Infallible>`。
-    /// - `ResBody`：响应 Body 类型。因为成功和错误路径用不同的 Body
-    ///   （成功=Incoming，错误=Empty<Bytes>），所以必须泛型化。
-    ///
-    /// # Body trait bounds 解释
-    /// - `ResBody: Body` —— hyper body 抽象 trait（http-body crate 提供）
-    /// - `ResBody: Send + Sync + 'static` —— 多线程安全 + 生命周期足够长
-    /// - `ResBody::Error: Into<Box<dyn StdError + Send + Sync>>` ——
-    ///   hyper 的 `http1::Builder::serve_connection` 要求 Body 的错误能
-    ///   转成 Box<dyn StdError>。`Infallible` 满足这个 bound（因为它
-    ///   实现了 StdError，且 Into 实现自动推导）。
-    ///
-    /// # 参数
-    /// - `service`：业务处理闭包。签名：
-    ///   ```ignore
-    ///   Fn(Request<Incoming>) -> impl Future<Output = Result<http::Response<ResBody>, Infallible>>
-    ///   ```
-    /// - `shutdown`：CancellationToken。调用 `token.cancel()` 触发优雅关闭。
+    /// - `ResBody`：响应 Body 类型。runtime 层统一用 BoxBody（类型擦除）。
     ///
     /// # hyper 1.x / hyper-util 0.1 API 调用链
     ///
@@ -155,7 +151,6 @@ impl HttpServer {
         // Body::Data 也必须 Send——因为 hyper 内部会把 body 的 Data 跨线程传递
         ResBody::Data: Send,
         // Body::Error 必须能转成 Box<dyn StdError>。
-        // 对于 Infallible：Infallible 实现 StdError + Send + Sync，所以自动满足。
         ResBody::Error: Into<Box<dyn StdError + Send + Sync>>,
     {
         // =================================================================
@@ -171,14 +166,7 @@ impl HttpServer {
         tracing::info!(target: "http_server", "listening on {}", actual);
 
         // =================================================================
-        // 2. 并发限制信号量
-        // =================================================================
-        // Phase 2 启用：Semaphore::new(N) + try_acquire() 在 service 层限流
-        // 目前先创建但不使用，保留扩展点
-        let semaphore = Arc::new(Semaphore::new(self.options.max_concurrent_requests as usize));
-
-        // =================================================================
-        // 3. Accept Loop
+        // 2. Accept Loop
         // =================================================================
         loop {
             tokio::select! {
@@ -210,16 +198,12 @@ impl HttpServer {
                     // hyper 1.x 内部使用的 IO trait（hyper_util 提供）
                     let io = TokioIo::new(stream);
 
-                    let sem = semaphore.clone();
                     let svc = service.clone();
 
                     // 每个连接一个 spawn task：hyper 的 serve_connection
                     // 内部已经是全异步的，不需要我们再做线程池管理
                     tokio::spawn(async move {
                         let svc = svc.clone();
-                        // Phase 2 Bulkhead：
-                        // let _permit = sem.try_acquire().ok_or_else(|| ...)?;
-                        let _ = sem;
 
                         // tower::service_fn：接受一个 async 闭包，生成 Tower Service。
                         // Tower Service 的核心 trait 是 tower::Service<Request> → Future<Response>。
@@ -239,13 +223,11 @@ impl HttpServer {
                         // hyper 和 Tower 的 Service trait 签名略有不同，这个适配器统一了两者。
                         let hyper_svc = TowerToHyperService::new(tower_svc);
 
-                        // http1::Builder::serve_connection：启动 HTTP/1.1 协议处理。
-                        // 参数：
-                        // - io：TokioIo<TcpStream>——hyper 直接在这个上面读写
-                        // - hyper_svc：转换后的 hyper Service——每个请求调用一次
-                        //
-                        // 返回的 Future resolve 时代表连接生命周期结束（正常关闭或错误）。
-                        let result = http1::Builder::new()
+                        // auto::Builder 根据客户端协议自动选择 HTTP/1.1 或 HTTP/2（h2c）：
+                        //   - 普通 HTTP/1.1 请求走 http1
+                        //   - gRPC / HTTP/2 prior-knowledge 请求走 h2c
+                        // 这样同一个监听端口即可同时承载 REST 与 gRPC。
+                        let result = auto::Builder::new(TokioExecutor::new())
                             .serve_connection(io, hyper_svc)
                             .await;
 

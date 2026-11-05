@@ -65,6 +65,24 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 ///    （例如 `Connection: keep-alive, X-Custom-Header` 表示 X-Custom-Header
 ///     也是 hop-by-hop 的），一并移除
 pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
+    // WebSocket / HTTP Upgrade：客户端显式要求协议升级时，必须保留
+    // `Upgrade` 与 `Connection: upgrade` 两个头，否则 hyper client 不会
+    // 发出升级请求，WebSocket 握手直接失败。
+    let is_upgrade_request = headers.contains_key("upgrade")
+        && headers
+            .get("connection")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase().contains("upgrade"))
+            .unwrap_or(false);
+
+    // gRPC 依赖 `TE: trailers`（HTTP/2 中唯一允许的 TE 值），
+    // 不能当作普通 hop-by-hop 头移除。
+    let keep_te_trailers = headers
+        .get("te")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().eq_ignore_ascii_case("trailers"))
+        .unwrap_or(false);
+
     // 先收集 Connection 头引用的额外 header 名（可能多个 Connection 头）
     let mut extra_hop: Vec<String> = Vec::new();
     // hyper 1.x 的 get_all 直接返回 GetAll 迭代器（不是 Option）
@@ -86,6 +104,14 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
     remove.extend(extra_hop);
 
     for name in &remove {
+        // 升级请求保留 Upgrade / Connection
+        if is_upgrade_request && (name == "upgrade" || name == "connection") {
+            continue;
+        }
+        // gRPC 保留 TE: trailers
+        if keep_te_trailers && name == "te" {
+            continue;
+        }
         // HeaderMap::remove 大小写不敏感（HTTP header 名是 case-insensitive）
         headers.remove(name);
     }

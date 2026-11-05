@@ -85,6 +85,83 @@ impl fmt::Display for LoadBalanceAlgorithm {
 }
 
 // ---------------------------------------------------------------------------
+// DiscoveryProviderKind —— 服务发现提供者类型（Phase 6）
+// ---------------------------------------------------------------------------
+
+/// 服务发现提供者类型。
+///
+/// 与 `gateway-discovery` 中具体 Provider 一一对应；
+/// `static` 表示端点直接写在 `upstreams[].endpoints` 中（默认）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryProviderKind {
+    /// 静态端点（YAML 直接配置）
+    #[default]
+    Static,
+    /// DNS：A/AAAA 或 SRV 记录
+    Dns,
+    /// Kubernetes EndpointSlice
+    Kubernetes,
+}
+
+impl fmt::Display for DiscoveryProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DiscoveryProviderKind::Static => f.write_str("static"),
+            DiscoveryProviderKind::Dns => f.write_str("dns"),
+            DiscoveryProviderKind::Kubernetes => f.write_str("kubernetes"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LifecycleStatus —— API 生命周期（Phase 7）
+// ---------------------------------------------------------------------------
+
+/// API 生命周期状态。
+///
+/// 数据面编译规则：
+/// - `Draft` / `Retired`：不进入路由表（对外不可见）
+/// - `Published`：正常提供服务
+/// - `Deprecated`：继续提供服务，但响应头带 `X-API-Deprecated: true`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleStatus {
+    /// 草稿：仅控制面可见，不对外发布
+    Draft,
+    /// 已发布：正常提供服务（默认）
+    #[default]
+    Published,
+    /// 已废弃：仍提供服务，但标记弃用（客户端应尽快迁移）
+    Deprecated,
+    /// 已下线：不进入路由表
+    Retired,
+}
+
+impl LifecycleStatus {
+    /// 是否允许数据面服务该资源。
+    pub fn is_servable(self) -> bool {
+        matches!(self, LifecycleStatus::Published | LifecycleStatus::Deprecated)
+    }
+
+    /// 是否属于「已发布（含废弃）」状态（门户目录展示用）。
+    pub fn is_listed(self) -> bool {
+        self.is_servable()
+    }
+}
+
+impl fmt::Display for LifecycleStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LifecycleStatus::Draft => f.write_str("draft"),
+            LifecycleStatus::Published => f.write_str("published"),
+            LifecycleStatus::Deprecated => f.write_str("deprecated"),
+            LifecycleStatus::Retired => f.write_str("retired"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HealthStatus —— 端点运行时健康状态
 // ---------------------------------------------------------------------------
 

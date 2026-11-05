@@ -108,11 +108,67 @@ impl UpstreamRegistry {
     pub fn upstream_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// 用动态发现的端点替换某个上游的端点集合（Phase 6 服务发现）。
+    ///
+    /// # 健康状态保留
+    ///
+    /// 同一 `host:port` 的端点如果之前已存在，复用其 `runtime_id` 与
+    /// `HealthStatus`——避免每轮刷新把正在使用的端点重置为 Unknown。
+    ///
+    /// 返回新端点数量；上游不存在时返回 0。
+    pub async fn replace_endpoints(
+        &self,
+        upstream_id: &str,
+        endpoints_cfg: Vec<gateway_core::EndpointConfig>,
+    ) -> usize {
+        let Some(entry) = self.entries.get(upstream_id) else {
+            return 0;
+        };
+
+        let mut upstream = entry.upstream.write().await;
+        // 旧端点快照：用于复用 runtime_id / health status
+        let old: Vec<(String, u16, String, HealthStatus)> = upstream
+            .endpoints
+            .iter()
+            .map(|ep| (ep.host.clone(), ep.port, ep.runtime_id.clone(), ep.status))
+            .collect();
+
+        let new_endpoints: Vec<Endpoint> = endpoints_cfg
+            .iter()
+            .enumerate()
+            .map(|(idx, cfg)| {
+                // 优先复用相同 host:port 的旧端点
+                if let Some((_, _, runtime_id, status)) =
+                    old.iter().find(|(host, port, _, _)| host == &cfg.host && *port == cfg.port)
+                {
+                    let mut ep = Endpoint::new(runtime_id.clone(), cfg.clone());
+                    ep.status = *status;
+                    ep
+                } else {
+                    Endpoint::new(format!("{upstream_id}-ep-{idx}"), cfg.clone())
+                }
+            })
+            .collect();
+
+        let count = new_endpoints.len();
+        upstream.endpoints = new_endpoints;
+        count
+    }
 }
 
 #[async_trait]
 impl UpstreamManager for UpstreamRegistry {
     async fn pick_endpoint(&self, upstream_id: &str) -> Result<Endpoint, UpstreamError> {
+        self.pick_endpoint_with_key(upstream_id, None).await
+    }
+
+    /// 带会话键选择端点：IP Hash / 一致性哈希 / 区域感知需要该 key。
+    async fn pick_endpoint_with_key(
+        &self,
+        upstream_id: &str,
+        key: Option<&str>,
+    ) -> Result<Endpoint, UpstreamError> {
         let entry = self
             .entries
             .get(upstream_id)
@@ -126,13 +182,25 @@ impl UpstreamManager for UpstreamRegistry {
             return Err(UpstreamError::NoHealthyEndpoints(upstream_id.to_string()));
         }
 
-        // LoadBalancer.select 返回的是对 healthy_refs 中元素的引用。
-        // 但 healthy_refs 的生命周期是这个函数调用内，而 LoadBalancer
-        // 的输出需要返回给调用方。我们需要 clone 一个 Endpoint 返回。
-        // 注意：Endpoint 是 Clone 的。
-        match entry.balancer.select(&healthy_refs) {
+        // LoadBalancer 返回的是对 healthy_refs 中元素的引用。
+        // healthy_refs 的生命周期止于本函数，所以需要 clone 一个 Endpoint 返回。
+        match entry.balancer.select_with_key(&healthy_refs, key) {
             Some(ep) => Ok(ep.clone()),
             None => Err(UpstreamError::NoHealthyEndpoints(upstream_id.to_string())),
+        }
+    }
+
+    /// 请求开始占用端点（Least Connections 需要）。
+    fn on_connection_start(&self, upstream_id: &str, endpoint_id: &str) {
+        if let Some(entry) = self.entries.get(upstream_id) {
+            entry.balancer.on_connection_start(endpoint_id);
+        }
+    }
+
+    /// 请求结束释放端点。
+    fn on_connection_end(&self, upstream_id: &str, endpoint_id: &str) {
+        if let Some(entry) = self.entries.get(upstream_id) {
+            entry.balancer.on_connection_end(endpoint_id);
         }
     }
 
@@ -187,6 +255,8 @@ mod tests {
         UpstreamConfig {
             id: id.to_string(),
             name: None,
+            tenant_id: None,
+            cluster_id: None,
             enabled: true,
             algorithm,
             endpoints: weights
@@ -198,8 +268,10 @@ mod tests {
                     port: 9000 + i as u16,
                     weight: *w,
                     zone: None,
+                    region: None,
                 })
                 .collect(),
+            discovery: None,
         }
     }
 

@@ -1,0 +1,70 @@
+# ======================================================================
+# Gateway 数据面示例配置（生产模板）
+# ----------------------------------------------------------------------
+# 与 e2e-test.yaml 的区别：
+#   - 监听 0.0.0.0（容器内需要对外暴露）
+#   - 开启 Prometheus Metrics
+#   - 日志使用 JSON 格式，便于采集
+# ======================================================================
+
+gateway:
+  id: gateway-prod
+  instance_name: gateway-node-1
+  environment: production
+
+server:
+  http:
+    enabled: true
+    address: "0.0.0.0"
+    port: 8080
+  admin:
+    enabled: true
+    address: "0.0.0.0"
+    port: 8081
+
+runtime:
+  max_connections: 10000
+  max_concurrent_requests: 5000
+  max_request_body_size: 10485760
+  graceful_shutdown_timeout_secs: 30
+
+observability:
+  logging:
+    level: info
+    format: json
+  metrics:
+    enabled: true
+    path: /metrics
+
+# 控制面配置分发（Phase 4）。
+# 独立/分布式部署时取消注释即可让数据面从控制面拉取配置：
+# control_plane:
+#   enabled: true
+#   endpoint: "http://gateway-control:8092"
+#   heartbeat_interval_secs: 10
+#   reconnect_interval_secs: 5
+
+upstreams:
+  - id: demo-upstream
+    name: "Demo Upstream"
+    enabled: true
+    algorithm: round_robin
+    endpoints:
+      - host: "mock-backend"
+        port: 80
+        weight: 1
+
+services:
+  - id: demo-service
+    name: "Demo Service"
+    enabled: true
+    upstream_id: demo-upstream
+
+routes:
+  - id: demo-route
+    name: "Public Demo API"
+    enabled: true
+    priority: 10
+    path_type: prefix
+    path_value: "/api/public"
+    service_id: demo-service

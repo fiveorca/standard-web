@@ -92,6 +92,9 @@ impl ResourceBundle {
         self.policies.cors.sort_by(|a, b| a.id.cmp(&b.id));
         self.policies.request_transform.sort_by(|a, b| a.id.cmp(&b.id));
         self.policies.response_transform.sort_by(|a, b| a.id.cmp(&b.id));
+        // Phase 7：WAF / 配额策略参与 checksum，必须稳定排序
+        self.policies.waf.sort_by(|a, b| a.id.cmp(&b.id));
+        self.policies.quota.sort_by(|a, b| a.id.cmp(&b.id));
 
         self
     }
@@ -195,6 +198,8 @@ mod tests {
         ServiceConfig {
             id: id.into(),
             name: None,
+            tenant_id: None,
+            lifecycle: gateway_core::LifecycleStatus::Published,
             enabled: true,
             upstream_id: "up-1".into(),
         }
@@ -204,6 +209,8 @@ mod tests {
         UpstreamConfig {
             id: id.into(),
             name: None,
+            tenant_id: None,
+            cluster_id: None,
             enabled: true,
             algorithm: LoadBalanceAlgorithm::RoundRobin,
             endpoints: vec![EndpointConfig {
@@ -212,7 +219,9 @@ mod tests {
                 port: 9000,
                 weight: 1,
                 zone: None,
+                region: None,
             }],
+            discovery: None,
         }
     }
 
@@ -220,6 +229,8 @@ mod tests {
         RouteConfig {
             id: id.into(),
             name: None,
+            tenant_id: None,
+            lifecycle: gateway_core::LifecycleStatus::Published,
             enabled: true,
             priority: 100,
             hosts: vec![],
@@ -236,6 +247,11 @@ mod tests {
             circuit_breaker_policy_id: None,
             cors_policy_id: None,
             path_rewrite: None,
+            traffic_split: None,
+            mirror: None,
+            // Phase 7：测试不使用 WAF / 配额
+            waf_policy_id: None,
+            quota_policy_id: None,
             request_transform_id: None,
             response_transform_id: None,
         }

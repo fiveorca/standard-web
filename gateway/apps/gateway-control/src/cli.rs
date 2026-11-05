@@ -20,6 +20,15 @@ pub struct Cli {
     )]
     pub bind: String,
 
+    /// gRPC 配置分发监听地址（数据面通过该端口注册/心跳/拉取快照）
+    #[arg(
+        long = "grpc-bind",
+        value_name = "ADDR",
+        default_value = "127.0.0.1:8092",
+        env = "GATEWAY_CONTROL_GRPC_BIND"
+    )]
+    pub grpc_bind: String,
+
     /// PostgreSQL 连接串
     #[arg(long = "database-url", value_name = "URL", env = "GATEWAY_DATABASE_URL")]
     pub database_url: Option<String>,

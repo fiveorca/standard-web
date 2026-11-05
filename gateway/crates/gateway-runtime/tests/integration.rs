@@ -188,6 +188,8 @@ fn make_rate_limit() -> RateLimitPlugin {
             header: None,
         },
         failure_mode: gateway_core::FailureMode::FailClosed,
+        backend: gateway_core::RateLimitBackend::Local,
+        redis_url: None,
     }])
     .expect("rate limit plugin should compile")
 }

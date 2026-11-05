@@ -14,6 +14,12 @@
 
 #![allow(clippy::needless_doctest_main)]
 
+pub mod dns_provider;
+pub mod k8s_provider;
 pub mod static_provider;
 
+pub use dns_provider::{
+    DnsDiscoveryConfig, DnsDiscoveryProvider, DnsQueryKind,
+};
+pub use k8s_provider::{K8sDiscoveryConfig, K8sDiscoveryProvider, SharedK8sProvider};
 pub use static_provider::StaticDiscoveryProvider;

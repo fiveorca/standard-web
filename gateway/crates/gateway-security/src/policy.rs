@@ -389,6 +389,7 @@ mod tests {
                 keys: vec![ApiKeyConfig {
                     key: String::new(),
                     label: None,
+                    tenant_id: None,
                 }],
                 header_name: "X-API-Key".into(),
                 query_param: None,

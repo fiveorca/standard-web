@@ -23,6 +23,8 @@
 
 pub mod admin;
 pub mod body;
+pub mod discovery;
+pub mod mirror;
 pub mod pipeline;
 pub mod runtime;
 pub mod state;

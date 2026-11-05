@@ -157,9 +157,47 @@ impl Plugin for RateLimitPlugin {
         };
 
         // 6) 执行限流
-        let allowed = match &policy.limiter {
-            RateLimiter::TokenBucket(limiter) => limiter.try_acquire(&key).await,
-            RateLimiter::FixedWindow(limiter) => limiter.try_acquire(&key).await,
+        //    - backend = redis：走共享计数；失败按 failure_mode 处理
+        //    - backend = local ：进程内 TokenBucket / FixedWindow
+        let (allowed, retry_after) = match &policy.redis {
+            Some(redis) => match redis.try_acquire(&key).await {
+                Ok(outcome) => (outcome.allowed, outcome.retry_after_secs),
+                Err(err) => match policy.failure_mode {
+                    // FailOpen：Redis 故障时放行，保障可用性
+                    gateway_core::FailureMode::FailOpen => {
+                        tracing::warn!(
+                            target: "traffic",
+                            request_id = ctx.request_id(),
+                            policy = %policy.id,
+                            error = %err,
+                            "redis rate limiter unavailable, failing open"
+                        );
+                        (true, None)
+                    },
+                    // FailClosed：Redis 故障时拒绝（安全优先）
+                    gateway_core::FailureMode::FailClosed => {
+                        return Err(PluginError::ExecutionFailed {
+                            plugin: RATE_LIMIT_PLUGIN_NAME.to_string(),
+                            message: format!("redis rate limiter failed: {err}"),
+                        });
+                    },
+                },
+            },
+            None => {
+                let allowed = match &policy.limiter {
+                    RateLimiter::TokenBucket(limiter) => limiter.try_acquire(&key).await,
+                    RateLimiter::FixedWindow(limiter) => limiter.try_acquire(&key).await,
+                };
+                let retry_after = if allowed {
+                    None
+                } else {
+                    match &policy.limiter {
+                        RateLimiter::TokenBucket(limiter) => limiter.retry_after_secs(&key).await,
+                        RateLimiter::FixedWindow(limiter) => limiter.retry_after_secs(&key).await,
+                    }
+                };
+                (allowed, retry_after)
+            },
         };
 
         if allowed {
@@ -167,11 +205,6 @@ impl Plugin for RateLimitPlugin {
         }
 
         // 7) 限流触发：计算 Retry-After 并短路
-        let retry_after = match &policy.limiter {
-            RateLimiter::TokenBucket(limiter) => limiter.retry_after_secs(&key).await,
-            RateLimiter::FixedWindow(limiter) => limiter.retry_after_secs(&key).await,
-        };
-
         tracing::debug!(
             target: "traffic",
             request_id = ctx.request_id(),
@@ -231,6 +264,8 @@ mod tests {
                 header: None,
             },
             failure_mode: gateway_core::FailureMode::FailClosed,
+            backend: gateway_core::RateLimitBackend::Local,
+            redis_url: None,
         }])
         .expect("plugin should compile")
     }
@@ -298,6 +333,8 @@ mod tests {
                 header: None,
             },
             failure_mode: gateway_core::FailureMode::FailClosed,
+            backend: gateway_core::RateLimitBackend::Local,
+            redis_url: None,
         };
         let plugin = RateLimitPlugin::from_configs(&[config]).expect("compile");
         let (mut parts, mut request_ctx) = make_ctx();

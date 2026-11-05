@@ -99,12 +99,15 @@ impl ApiKeyPolicy {
         //    即使已命中也不提前结束，防止"Key 在列表中的位置"影响响应时间
         let mut matched = Choice::from(0);
         let mut label: Option<String> = None;
+        // 命中的 Key 所绑定的租户（Phase 7）
+        let mut tenant: Option<String> = None;
         for key in &self.keys {
             let eq = constant_time_eq_str(provided.as_ref(), &key.key);
             matched |= eq;
             // 命中后记录 label（label 是非机密展示名，可安全用于日志）
             if bool::from(eq) {
                 label = key.label.clone();
+                tenant = key.tenant_id.clone();
             }
         }
 
@@ -116,6 +119,10 @@ impl ApiKeyPolicy {
         let mut identity = AuthIdentity::new(AuthMechanism::ApiKey);
         if let Some(label) = label {
             identity = identity.with_label(label);
+        }
+        // API Key 绑定的租户写入身份，供配额与审计使用
+        if let Some(tenant) = tenant {
+            identity = identity.with_tenant(tenant);
         }
         Ok(identity)
     }
@@ -171,6 +178,7 @@ mod tests {
             .map(|(idx, key)| ApiKeyConfig {
                 key: (*key).to_string(),
                 label: Some(format!("caller-{idx}")),
+                tenant_id: None,
             })
             .collect();
         ApiKeyPolicy::compile(&configs, "X-API-Key", query_param)
@@ -244,6 +252,7 @@ mod tests {
         let keys = vec![ApiKeyConfig {
             key: "k".into(),
             label: None,
+            tenant_id: None,
         }];
         assert!(ApiKeyPolicy::compile(&keys, "bad header", None).is_err());
     }

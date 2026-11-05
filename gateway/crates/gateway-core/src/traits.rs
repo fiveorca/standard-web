@@ -85,6 +85,27 @@ pub trait LoadBalancer: Send + Sync {
     /// - `None`：输入列表为空
     fn select<'a>(&self, healthy: &'a [&'a Endpoint]) -> Option<&'a Endpoint>;
 
+    /// 带会话键的选择（IP Hash / 一致性哈希 / 区域感知使用）。
+    ///
+    /// 默认实现忽略 `key`，退化为 [`LoadBalancer::select`]，保证已有
+    /// 算法无需改动即可继续工作。
+    fn select_with_key<'a>(
+        &self,
+        healthy: &'a [&'a Endpoint],
+        key: Option<&str>,
+    ) -> Option<&'a Endpoint> {
+        let _ = key;
+        self.select(healthy)
+    }
+
+    /// 请求开始占用某个端点时回调（Least Connections 统计在途请求数）。
+    ///
+    /// 默认空实现；只有需要连接计数的算法覆盖它。
+    fn on_connection_start(&self, _endpoint_id: &str) {}
+
+    /// 请求结束释放某个端点时回调。
+    fn on_connection_end(&self, _endpoint_id: &str) {}
+
     /// 返回本负载均衡器的算法类型（调试/日志用）
     fn algorithm(&self) -> LoadBalanceAlgorithm;
 }
@@ -102,6 +123,28 @@ pub trait UpstreamManager: Send + Sync {
     /// 根据 upstream_id 选一个健康端点。
     /// 内部会自己维护负载均衡状态。
     async fn pick_endpoint(&self, upstream_id: &str) -> Result<Endpoint, UpstreamError>;
+
+    /// 带会话键选择端点（IP Hash / 一致性哈希 / 区域感知使用）。
+    ///
+    /// 默认实现忽略 key，退化为 [`UpstreamManager::pick_endpoint`]。
+    async fn pick_endpoint_with_key(
+        &self,
+        upstream_id: &str,
+        key: Option<&str>,
+    ) -> Result<Endpoint, UpstreamError> {
+        let _ = key;
+        self.pick_endpoint(upstream_id).await
+    }
+
+    /// 请求开始占用端点（Least Connections 计数）。
+    fn on_connection_start(&self, upstream_id: &str, endpoint_id: &str) {
+        let _ = (upstream_id, endpoint_id);
+    }
+
+    /// 请求结束释放端点。
+    fn on_connection_end(&self, upstream_id: &str, endpoint_id: &str) {
+        let _ = (upstream_id, endpoint_id);
+    }
 
     /// 更新某个端点的健康状态。
     /// 由健康检查或上游请求失败回调触发。

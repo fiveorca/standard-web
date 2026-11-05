@@ -11,11 +11,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use gateway_control_api::{build_admin_router, AdminAuth, AdminState, Role};
+use gateway_control_grpc::ConfigDistributionService;
 use gateway_control_service::ConfigService;
 use gateway_observability::init_logging;
 use gateway_storage::{
     connect_and_migrate, MemoryRepository, PoolSettings, PostgresRepository, SharedRepository,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::cli::Cli;
 
@@ -64,7 +66,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     // 4. 构建 Router 并启动
     let service = ConfigService::new(repo);
-    let app = build_admin_router(AdminState::new(service, auth));
+    let app = build_admin_router(AdminState::new(service.clone(), auth));
 
     let addr: SocketAddr = cli
         .bind
@@ -76,8 +78,30 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     tracing::info!(%addr, "gateway-control listening on /api/admin/v1");
 
+    // 5. gRPC 配置分发（Phase 4）：与 Admin API 共享同一个 ConfigService
+    let grpc_addr: SocketAddr = cli
+        .grpc_bind
+        .parse()
+        .with_context(|| format!("invalid gRPC bind address '{}'", cli.grpc_bind))?;
+    let shutdown = CancellationToken::new();
+    let grpc_shutdown = shutdown.clone();
+    let grpc_service = ConfigDistributionService::new(Arc::new(service));
+    tokio::spawn(async move {
+        let result = grpc_service
+            .serve(grpc_addr, async move { grpc_shutdown.cancelled().await })
+            .await;
+        if let Err(err) = result {
+            tracing::error!(error = %err, "gRPC config distribution server stopped");
+        }
+    });
+    tracing::info!(%grpc_addr, "gateway-control gRPC config distribution listening");
+
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // 通知 gRPC server 一起退出
+            shutdown.cancel();
+        })
         .await
         .context("admin server failed")?;
 

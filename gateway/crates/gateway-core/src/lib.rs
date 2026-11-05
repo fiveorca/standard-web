@@ -29,6 +29,7 @@
 #![allow(clippy::needless_doctest_main)]
 
 pub mod models;
+pub mod platform;
 pub mod policy;
 pub mod prelude;
 pub mod request_context;
@@ -37,6 +38,7 @@ pub mod types;
 
 // 方便下游直接 use
 pub use models::*;
+pub use platform::*;
 pub use policy::*;
 pub use request_context::*;
 pub use traits::*;

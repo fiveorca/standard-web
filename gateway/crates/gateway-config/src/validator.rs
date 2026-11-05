@@ -120,6 +120,84 @@ fn validate_upstreams(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                 });
             }
         }
+
+        // ---- Phase 6：动态服务发现配置校验 ----
+        if let Some(discovery) = &upstream.discovery {
+            let base = format!("upstreams[{idx}].discovery");
+            match discovery.provider {
+                gateway_core::DiscoveryProviderKind::Static => {
+                    errors.push(ConfigError {
+                        path: format!("{base}.provider"),
+                        message: "discovery.provider must be 'dns' or 'kubernetes' when discovery is set"
+                            .into(),
+                    });
+                },
+                gateway_core::DiscoveryProviderKind::Dns => {
+                    if discovery
+                        .domain
+                        .as_deref()
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        errors.push(ConfigError {
+                            path: format!("{base}.domain"),
+                            message: "discovery.domain is required for dns provider".into(),
+                        });
+                    }
+                    if let Some(resolver) = discovery.dns_resolver.as_deref() {
+                        if resolver.parse::<std::net::SocketAddr>().is_err() {
+                            errors.push(ConfigError {
+                                path: format!("{base}.dns_resolver"),
+                                message: format!(
+                                    "invalid dns_resolver '{resolver}', expected host:port"
+                                ),
+                            });
+                        }
+                    }
+                },
+                gateway_core::DiscoveryProviderKind::Kubernetes => {
+                    if discovery
+                        .namespace
+                        .as_deref()
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        errors.push(ConfigError {
+                            path: format!("{base}.namespace"),
+                            message: "discovery.namespace is required for kubernetes provider".into(),
+                        });
+                    }
+                    if discovery
+                        .service
+                        .as_deref()
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        errors.push(ConfigError {
+                            path: format!("{base}.service"),
+                            message: "discovery.service is required for kubernetes provider".into(),
+                        });
+                    }
+                },
+            }
+            if discovery.refresh_interval_secs == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.refresh_interval_secs"),
+                    message: "refresh_interval_secs must be >= 1".into(),
+                });
+            }
+            // 配置了动态发现却没有任何端点时，SDK 无法推导默认端口（DNS A 记录模式）
+            if discovery.provider == gateway_core::DiscoveryProviderKind::Dns
+                && upstream.endpoints.is_empty()
+                && discovery.dns_record == gateway_core::DnsRecordKind::A
+            {
+                errors.push(ConfigError {
+                    path: format!("{base}.dns_record"),
+                    message: "dns A-record discovery requires at least one static endpoint to derive default port"
+                        .into(),
+                });
+            }
+        }
     }
 }
 
@@ -160,6 +238,8 @@ fn validate_services(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
 
 fn validate_routes(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
     let mut seen_ids: HashSet<&str> = HashSet::new();
+    // Service ID 集合：用于灰度/镜像目标的引用完整性校验
+    let service_ids: HashSet<&str> = cfg.services.iter().map(|s| s.id.as_str()).collect();
 
     // 冲突检测需要：在相同 Host+Path+Method+Header+Query+Priority 组合下，
     // 不能有两条 Route。这个组合定义了"确定性匹配"——如果两条 Route 的
@@ -203,6 +283,60 @@ fn validate_routes(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                 path: format!("{base}.service_id"),
                 message: "service_id must not be empty".into(),
             });
+        }
+
+        // ---- Phase 6：灰度 / 蓝绿 / 加权路由校验 ----
+        if let Some(split) = &route.traffic_split {
+            if split.targets.is_empty() {
+                errors.push(ConfigError {
+                    path: format!("{base}.traffic_split.targets"),
+                    message: "traffic_split.targets must not be empty".into(),
+                });
+            }
+            let mut total_weight: u64 = 0;
+            for (t_idx, target) in split.targets.iter().enumerate() {
+                total_weight += u64::from(target.weight);
+                if !service_ids.contains(target.service_id.as_str()) {
+                    errors.push(ConfigError {
+                        path: format!("{base}.traffic_split.targets[{t_idx}].service_id"),
+                        message: format!(
+                            "traffic_split target service '{}' does not exist",
+                            target.service_id
+                        ),
+                    });
+                }
+                // 注意：targets 允许包含 route.service_id —— 灰度发布常见
+                // 形态就是「稳定版 + 金丝雀」按权重分流。
+            }
+            if total_weight == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.traffic_split.targets"),
+                    message: "traffic_split total weight must be greater than 0".into(),
+                });
+            }
+        }
+
+        // ---- Phase 6：流量镜像校验 ----
+        if let Some(mirror) = &route.mirror {
+            if mirror.percentage > 100 {
+                errors.push(ConfigError {
+                    path: format!("{base}.mirror.percentage"),
+                    message: "mirror.percentage must be in 0..=100".into(),
+                });
+            }
+            if !service_ids.contains(mirror.service_id.as_str()) {
+                errors.push(ConfigError {
+                    path: format!("{base}.mirror.service_id"),
+                    message: format!("mirror service '{}' does not exist", mirror.service_id),
+                });
+            }
+            // 镜像到自身会造成请求回路（影子请求再次被镜像）
+            if mirror.service_id == route.service_id {
+                errors.push(ConfigError {
+                    path: format!("{base}.mirror.service_id"),
+                    message: "mirror.service_id must differ from route.service_id".into(),
+                });
+            }
         }
 
         // 冲突检测的组合键

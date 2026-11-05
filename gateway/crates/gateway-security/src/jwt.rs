@@ -257,6 +257,15 @@ impl JwtPolicy {
         if let Some(subject) = data.claims.get("sub").and_then(Value::as_str) {
             identity = identity.with_subject(subject);
         }
+        // 多租户（Phase 7）：优先 tenant，其次 tenant_id 声明
+        if let Some(tenant) = data
+            .claims
+            .get("tenant")
+            .and_then(Value::as_str)
+            .or_else(|| data.claims.get("tenant_id").and_then(Value::as_str))
+        {
+            identity = identity.with_tenant(tenant);
+        }
         Ok(Some(identity))
     }
 

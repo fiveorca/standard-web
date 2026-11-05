@@ -84,6 +84,12 @@ pub struct RequestContext {
     /// 最终返回给客户端的 HTTP 状态码
     pub status_code: Option<u16>,
 
+    // ---- 身份与租户（Phase 7）---- //
+    /// 认证后的消费者标识（JWT sub / Basic 用户名 / API Key label）
+    pub consumer_id: Option<String>,
+    /// 认证身份所属租户（JWT tenant 声明 / API Key 绑定的租户）
+    pub tenant_id: Option<String>,
+
     // ---- 错误（如果有）---- //
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -111,6 +117,8 @@ impl RequestContext {
             upstream_headers_arrived: None,
             request_end: None,
             status_code: None,
+            consumer_id: None,
+            tenant_id: None,
             error_code: None,
             error_message: None,
         }

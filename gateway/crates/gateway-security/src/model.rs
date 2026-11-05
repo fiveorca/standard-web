@@ -76,6 +76,10 @@ pub struct AuthIdentity {
     pub subject: Option<String>,
     /// 可读标签（API Key 配置中的 `label`），用于日志中替代密钥明文
     pub label: Option<String>,
+    /// 所属租户（Phase 7）：
+    ///   - API Key：策略条目上绑定的 `tenant_id`
+    ///   - JWT：`tenant` / `tenant_id` 声明
+    pub tenant_id: Option<String>,
 }
 
 impl AuthIdentity {
@@ -88,6 +92,7 @@ impl AuthIdentity {
             mechanism,
             subject: None,
             label: None,
+            tenant_id: None,
         }
     }
 
@@ -100,6 +105,12 @@ impl AuthIdentity {
     /// 设置可读标签（链式调用）。
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// 设置所属租户（链式调用）。
+    pub fn with_tenant(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
         self
     }
 }

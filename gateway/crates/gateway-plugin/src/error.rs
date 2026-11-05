@@ -70,6 +70,13 @@ pub enum PluginError {
         /// 被查找的插件名
         name: String,
     },
+
+    /// 通用错误：插件在执行期遇到无法归类的内部错误。
+    ///
+    /// 语义同 `ExecutionFailed`，但不需要预先知道插件名（适合工具性
+    /// 辅助函数构造错误、`ExecutionFailed` 内部包装等场景）。
+    #[error("plugin error: {0}")]
+    Other(String),
 }
 
 impl PluginError {
@@ -104,6 +111,7 @@ impl PluginError {
             PluginError::Timeout { plugin, timeout_ms } => {
                 GatewayError::Internal(format!("plugin '{plugin}' timed out after {timeout_ms}ms"))
             },
+            PluginError::Other(msg) => GatewayError::Internal(msg.clone()),
         }
     }
 }

@@ -21,7 +21,9 @@
 //! 这个签名让调用方负责过滤健康端点（这样 Balancer 不需要知道 HealthStatus）。
 //! 所以输入是引用切片的切片，输出是原始引用。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use gateway_core::{Endpoint, LoadBalanceAlgorithm, LoadBalancer};
 
@@ -230,6 +232,278 @@ impl LoadBalancer for WeightedRandomBalancer {
 }
 
 // ---------------------------------------------------------------------------
+// 通用：稳定哈希
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 64 位哈希。
+///
+/// 不使用 `std::collections::hash_map::DefaultHasher`：它的算法未承诺稳定，
+/// 且不同进程/版本可能不同，会导致同一 IP 在不同网关实例上落到不同端点。
+fn fnv1a(input: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+// ---------------------------------------------------------------------------
+// LeastConnectionsBalancer
+// ---------------------------------------------------------------------------
+
+/// 最少连接负载均衡器。
+///
+/// 维护每个端点的在途请求数，选择当前在途最少的端点。运行时在
+/// `ProxyClient::forward` 前后分别调用 `on_connection_start` /
+/// `on_connection_end`（响应头返回即视为本次代理占用结束，流式响应体
+/// 不阻塞新的选择决策）。
+///
+/// 平手时用内部轮询计数器打散，避免所有请求都压到第一个端点。
+pub struct LeastConnectionsBalancer {
+    /// endpoint runtime_id → 在途请求数
+    active: Mutex<HashMap<String, u64>>,
+    /// 平手时的轮询计数器
+    counter: AtomicU64,
+}
+
+impl LeastConnectionsBalancer {
+    /// 创建空的最少连接均衡器。
+    pub fn new() -> Self {
+        Self { active: Mutex::new(HashMap::new()), counter: AtomicU64::new(0) }
+    }
+}
+
+impl Default for LeastConnectionsBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoadBalancer for LeastConnectionsBalancer {
+    fn select<'a>(&self, healthy: &'a [&'a Endpoint]) -> Option<&'a Endpoint> {
+        if healthy.is_empty() {
+            return None;
+        }
+        let guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        let min_active = healthy
+            .iter()
+            .map(|ep| guard.get(&ep.runtime_id).copied().unwrap_or(0))
+            .min()
+            .unwrap_or(0);
+        // 找出所有并列最小的端点，用轮询计数器打散
+        let candidates: Vec<&Endpoint> = healthy
+            .iter()
+            .copied()
+            .filter(|ep| guard.get(&ep.runtime_id).copied().unwrap_or(0) == min_active)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let idx = (self.counter.fetch_add(1, Ordering::Relaxed) as usize) % candidates.len();
+        candidates.get(idx).copied()
+    }
+
+    fn on_connection_start(&self, endpoint_id: &str) {
+        let mut guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        let counter = guard.entry(endpoint_id.to_string()).or_insert(0);
+        *counter = counter.saturating_add(1);
+    }
+
+    fn on_connection_end(&self, endpoint_id: &str) {
+        let mut guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(counter) = guard.get_mut(endpoint_id) {
+            *counter = counter.saturating_sub(1);
+        }
+    }
+
+    fn algorithm(&self) -> LoadBalanceAlgorithm {
+        LoadBalanceAlgorithm::LeastConnections
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IpHashBalancer
+// ---------------------------------------------------------------------------
+
+/// IP Hash 负载均衡器。
+///
+/// 同一客户端 IP 始终落到同一端点，用于无 Cookie 的会话保持。
+/// `key` 为空时退化为轮询。
+pub struct IpHashBalancer {
+    counter: AtomicU64,
+}
+
+impl IpHashBalancer {
+    /// 创建新的 IP Hash 均衡器。
+    pub fn new() -> Self {
+        Self { counter: AtomicU64::new(0) }
+    }
+}
+
+impl Default for IpHashBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoadBalancer for IpHashBalancer {
+    fn select<'a>(&self, healthy: &'a [&'a Endpoint]) -> Option<&'a Endpoint> {
+        if healthy.is_empty() {
+            return None;
+        }
+        let idx = (self.counter.fetch_add(1, Ordering::Relaxed) as usize) % healthy.len();
+        healthy.get(idx).copied()
+    }
+
+    fn select_with_key<'a>(
+        &self,
+        healthy: &'a [&'a Endpoint],
+        key: Option<&str>,
+    ) -> Option<&'a Endpoint> {
+        match key {
+            Some(key) if !key.is_empty() && !healthy.is_empty() => {
+                let idx = (fnv1a(key) as usize) % healthy.len();
+                healthy.get(idx).copied()
+            },
+            _ => self.select(healthy),
+        }
+    }
+
+    fn algorithm(&self) -> LoadBalanceAlgorithm {
+        LoadBalanceAlgorithm::IpHash
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConsistentHashBalancer
+// ---------------------------------------------------------------------------
+
+/// 一致性哈希负载均衡器。
+///
+/// 按"权重区间 + 稳定哈希"选择：`hash(key) % total_weight` 落入哪个端点
+/// 的累计权重区间就选谁。相同 key 在端点集合不变时始终命中同一端点，
+/// 端点增减时只有落入变化区间的 key 会迁移，比 IP Hash 的取模方式
+/// 迁移面更小。
+pub struct ConsistentHashBalancer {
+    counter: AtomicU64,
+}
+
+impl ConsistentHashBalancer {
+    /// 创建新的一致性哈希均衡器。
+    pub fn new() -> Self {
+        Self { counter: AtomicU64::new(0) }
+    }
+}
+
+impl Default for ConsistentHashBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoadBalancer for ConsistentHashBalancer {
+    fn select<'a>(&self, healthy: &'a [&'a Endpoint]) -> Option<&'a Endpoint> {
+        if healthy.is_empty() {
+            return None;
+        }
+        let idx = (self.counter.fetch_add(1, Ordering::Relaxed) as usize) % healthy.len();
+        healthy.get(idx).copied()
+    }
+
+    fn select_with_key<'a>(
+        &self,
+        healthy: &'a [&'a Endpoint],
+        key: Option<&str>,
+    ) -> Option<&'a Endpoint> {
+        if healthy.is_empty() {
+            return None;
+        }
+        let Some(key) = key.filter(|k| !k.is_empty()) else {
+            return self.select(healthy);
+        };
+        let total_weight: u64 = healthy.iter().map(|e| u64::from(e.weight.max(1))).sum();
+        if total_weight == 0 {
+            return None;
+        }
+        let pos = fnv1a(key) % total_weight;
+        let mut accum: u64 = 0;
+        for ep in healthy {
+            accum += u64::from(ep.weight.max(1));
+            if pos < accum {
+                return Some(ep);
+            }
+        }
+        healthy.last().copied()
+    }
+
+    fn algorithm(&self) -> LoadBalanceAlgorithm {
+        LoadBalanceAlgorithm::ConsistentHash
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZoneAwareBalancer
+// ---------------------------------------------------------------------------
+
+/// 区域感知负载均衡器。
+///
+/// `key` 视为客户端所在区域（zone）。优先在相同 zone 的端点内轮询，
+/// 没有同区域端点时退化为全体端点轮询。
+pub struct ZoneAwareBalancer {
+    counter: AtomicU64,
+}
+
+impl ZoneAwareBalancer {
+    /// 创建新的区域感知均衡器。
+    pub fn new() -> Self {
+        Self { counter: AtomicU64::new(0) }
+    }
+}
+
+impl Default for ZoneAwareBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoadBalancer for ZoneAwareBalancer {
+    fn select<'a>(&self, healthy: &'a [&'a Endpoint]) -> Option<&'a Endpoint> {
+        if healthy.is_empty() {
+            return None;
+        }
+        let idx = (self.counter.fetch_add(1, Ordering::Relaxed) as usize) % healthy.len();
+        healthy.get(idx).copied()
+    }
+
+    fn select_with_key<'a>(
+        &self,
+        healthy: &'a [&'a Endpoint],
+        key: Option<&str>,
+    ) -> Option<&'a Endpoint> {
+        let Some(zone) = key.filter(|k| !k.is_empty()) else {
+            return self.select(healthy);
+        };
+        // 优先同 zone 端点
+        let same_zone: Vec<&Endpoint> = healthy
+            .iter()
+            .copied()
+            .filter(|ep| ep.zone.as_deref() == Some(zone))
+            .collect();
+        let candidates = if same_zone.is_empty() { healthy.to_vec() } else { same_zone };
+        if candidates.is_empty() {
+            return None;
+        }
+        let idx = (self.counter.fetch_add(1, Ordering::Relaxed) as usize) % candidates.len();
+        candidates.get(idx).copied()
+    }
+
+    fn algorithm(&self) -> LoadBalanceAlgorithm {
+        LoadBalanceAlgorithm::ZoneAware
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Balancer 构造函数（从 LoadBalanceAlgorithm 创建）
 // ---------------------------------------------------------------------------
 
@@ -242,11 +516,10 @@ pub fn make_balancer(algorithm: LoadBalanceAlgorithm) -> Box<dyn LoadBalancer> {
         LoadBalanceAlgorithm::WeightedRoundRobin => Box::new(WeightedRoundRobinBalancer::new()),
         LoadBalanceAlgorithm::Random => Box::new(RandomBalancer::new()),
         LoadBalanceAlgorithm::WeightedRandom => Box::new(WeightedRandomBalancer::new()),
-        // P1 阶段：暂未实现的算法 fallback 到 Round Robin
-        other => {
-            tracing::warn!("algorithm {:?} not yet implemented, falling back to RoundRobin", other);
-            Box::new(RoundRobinBalancer::new())
-        },
+        LoadBalanceAlgorithm::LeastConnections => Box::new(LeastConnectionsBalancer::new()),
+        LoadBalanceAlgorithm::IpHash => Box::new(IpHashBalancer::new()),
+        LoadBalanceAlgorithm::ConsistentHash => Box::new(ConsistentHashBalancer::new()),
+        LoadBalanceAlgorithm::ZoneAware => Box::new(ZoneAwareBalancer::new()),
     }
 }
 

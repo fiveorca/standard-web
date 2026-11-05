@@ -4,7 +4,7 @@
 //! 静态路径（`/config/versions/latest`）与动态路径（`/config/versions/{version}`）
 //! 同时存在时，Axum 的静态匹配优先。
 
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 
 use crate::handlers;
@@ -21,7 +21,7 @@ pub fn build_router(state: AdminState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
         .route("/status", get(handlers::status))
-        // 资源 CRUD
+        // 通用资源 CRUD（按 kind 动态解析）
         .route(
             "/resources/{kind}",
             get(handlers::list_resources).post(handlers::create_resource),
@@ -32,6 +32,39 @@ pub fn build_router(state: AdminState) -> Router {
                 .put(handlers::update_resource)
                 .delete(handlers::delete_resource),
         )
+        // consumers 别名路由（设计文档 8.5）
+        .route(
+            "/consumers",
+            get(handlers::list_consumers).post(handlers::create_consumer),
+        )
+        .route(
+            "/consumers/{id}",
+            get(handlers::get_consumer)
+                .put(handlers::update_consumer)
+                .delete(handlers::delete_consumer),
+        )
+        // Consumer 嵌套凭据（设计文档 8.6）
+        .route(
+            "/consumers/{id}/credentials",
+            post(handlers::create_credential),
+        )
+        .route(
+            "/consumers/{consumer_id}/credentials/{credential_id}",
+            delete(handlers::delete_credential),
+        )
+        // plugins 别名路由（设计文档 8.7）
+        .route(
+            "/plugins",
+            get(handlers::list_plugins).post(handlers::create_plugin),
+        )
+        .route(
+            "/plugins/{id}",
+            get(handlers::get_plugin)
+                .put(handlers::update_plugin)
+                .delete(handlers::delete_plugin),
+        )
+        .route("/plugins/{id}/enable", post(handlers::enable_plugin))
+        .route("/plugins/{id}/disable", post(handlers::disable_plugin))
         // 配置查询 / 校验 / 编译 / 发布 / 回滚
         .route("/config", get(handlers::current_config))
         .route("/config/validate", post(handlers::validate_config))

@@ -110,15 +110,26 @@ pub async fn start_admin_server(
     // -----------------------------------------------------------------
     // 1. 组装路由
     // -----------------------------------------------------------------
-    let app = Router::new()
+    // Metrics 路径来自配置，注册前先取出来（避免与 with_state 的
+    // runtime move 产生借用冲突）。
+    let metrics_enabled = runtime.metrics_enabled();
+    let metrics_path = runtime.metrics_path().to_string();
+
+    let mut app = Router::new()
         // .route 接受 path + 一个或多个 HTTP method handler
         // routing::get(handler) 注册 GET 方法
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
-        .route("/version", get(version_handler))
-        // with_state 把 runtime 注入 Router
-        // handler 通过 State<Arc<Runtime>> extractor 拿到它
-        .with_state(runtime);
+        .route("/version", get(version_handler));
+
+    // observability.metrics.enabled 为 true 时才暴露 Prometheus 端点
+    if metrics_enabled {
+        app = app.route(&metrics_path, get(metrics_handler));
+    }
+
+    // with_state 把 runtime 注入 Router
+    // handler 通过 State<Arc<Runtime>> extractor 拿到它
+    let app = app.with_state(runtime);
 
     // integrated 模式：把控制面路由合并进来。`extra` 已经是 `Router<()>`，
     // 与上面 with_state 之后的 Router 状态类型一致，可以直接 merge。
@@ -199,6 +210,21 @@ async fn ready_handler(State(rt): State<Arc<Runtime>>) -> impl IntoResponse {
             }),
         )
     }
+}
+
+/// GET /metrics —— Prometheus 文本格式指标导出。
+///
+/// 只有 `observability.metrics.enabled = true` 时才会注册该路由。
+/// Content-Type 按 Prometheus 文本协议约定设置。
+async fn metrics_handler() -> impl IntoResponse {
+    // 全局注册表渲染为文本；渲染失败不会发生（内部只用 writeln!）
+    let body = gateway_observability::Metrics::global().render();
+    let mut response = (StatusCode::OK, body).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+    );
+    response
 }
 
 /// GET /version —— 版本和实例信息。

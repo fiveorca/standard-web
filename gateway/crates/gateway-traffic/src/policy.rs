@@ -8,9 +8,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gateway_core::{RateLimitAlgorithm, RateLimitPolicyConfig};
+use gateway_core::{RateLimitAlgorithm, RateLimitBackend, RateLimitPolicyConfig};
 
 use crate::fixed_window::FixedWindowLimiter;
+use crate::redis_limiter::RedisLimiter;
 use crate::token_bucket::TokenBucketLimiter;
 
 /// 单个已编译的限流策略。
@@ -26,6 +27,10 @@ pub struct CompiledRateLimitPolicy {
     pub algorithm: RateLimitAlgorithm,
     /// 限流器实例（已预构建）
     pub limiter: RateLimiter,
+    /// Redis 分布式限流器（`backend = redis` 时存在）
+    ///
+    /// 存在时优先使用 Redis 计数；Redis 故障按 `failure_mode` 处理。
+    pub redis: Option<Arc<RedisLimiter>>,
     /// 计数键配置
     pub key: gateway_core::RateLimitKeySpec,
     /// 故障模式（FailClosed / FailOpen）
@@ -87,6 +92,23 @@ impl CompiledRateLimitPolicies {
                 enabled: config.enabled,
                 algorithm: config.algorithm,
                 limiter,
+                // Redis 后端：固定窗口计数（token_bucket 配置退化为固定窗口）
+                redis: match config.backend {
+                    RateLimitBackend::Local => None,
+                    RateLimitBackend::Redis => {
+                        let url = config.redis_url.clone().ok_or_else(|| {
+                            format!(
+                                "rate_limit[{idx}] ('{}'): redis_url is required when backend=redis",
+                                config.id
+                            )
+                        })?;
+                        Some(Arc::new(RedisLimiter::new(
+                            url,
+                            config.rate,
+                            config.window_secs.max(1),
+                        )))
+                    },
+                },
                 key: config.key.clone(),
                 failure_mode: config.failure_mode,
             };
@@ -132,6 +154,8 @@ mod tests {
                 header: None,
             },
             failure_mode: FailureMode::FailClosed,
+            backend: gateway_core::RateLimitBackend::Local,
+            redis_url: None,
         }
     }
 

@@ -42,7 +42,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use gateway_core::RequestContext;
-use gateway_observability::AccessLog;
+use gateway_observability::{AccessLog, Metrics};
 use http::{HeaderValue, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -183,6 +183,9 @@ impl ObservedBody {
             // 注意：此时 status_code / error_code 等字段早已由 handler 写入。
             ctx.request_end = Some(Instant::now());
             AccessLog::emit(&ctx);
+            // 与 AccessLog 使用同一时机记录 Prometheus 指标，
+            // 保证日志与指标看到的是同一份请求终态。
+            Metrics::global().observe_request(&ctx);
         }
     }
 }

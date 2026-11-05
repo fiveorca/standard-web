@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{HealthStatus, LoadBalanceAlgorithm, PathType};
+use crate::types::{
+    DiscoveryProviderKind, HealthStatus, LifecycleStatus, LoadBalanceAlgorithm, PathType,
+};
 
 // ===========================================================================
 // 配置模型（Config）
@@ -69,6 +71,17 @@ pub struct RouteConfig {
     /// 人类可读名称，例如 "user-api-v1"。可选，用于日志和管理界面展示
     #[serde(default)]
     pub name: Option<String>,
+    /// 所属租户（Phase 7 Multi-Tenant）。
+    ///
+    /// `None` 表示平台级公共路由；配置后控制面按租户隔离，
+    /// 数据面对请求租户的校验由认证插件写入 RequestContext 完成。
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// API 生命周期状态（Phase 7）。
+    ///
+    /// 默认 `published`，保证既有配置行为不变。
+    #[serde(default)]
+    pub lifecycle: LifecycleStatus,
     /// 是否启用。禁用的 Route 在编译时被跳过
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -119,10 +132,30 @@ pub struct RouteConfig {
     /// CORS 策略引用（P2.1 新增）
     #[serde(default)]
     pub cors_policy_id: Option<String>,
+    /// WAF 策略引用（Phase 7）
+    #[serde(default)]
+    pub waf_policy_id: Option<String>,
+    /// 配额策略引用（Phase 7）
+    #[serde(default)]
+    pub quota_policy_id: Option<String>,
 
     // ---- 请求/响应转换（Phase 2+）---- //
     #[serde(default)]
     pub path_rewrite: Option<String>,
+
+    // ---- Phase 6：灰度发布 / 流量镜像 ---- //
+    /// 灰度 / 蓝绿 / 加权路由：按权重把流量分发到多个 Service。
+    ///
+    /// 未配置时全部走 `service_id`；配置后 `service_id` 作为兜底目标，
+    /// targets 的权重决定实际分流比例（Canary 常用 90/10，
+    /// Blue-Green 通过把权重切换到 0/100 完成整体切换）。
+    #[serde(default)]
+    pub traffic_split: Option<TrafficSplitConfig>,
+    /// 流量镜像：把按比例抽取的请求副本异步发送到影子 Service。
+    ///
+    /// 镜像请求不参与客户端响应，失败只记录日志，不影响主链路。
+    #[serde(default)]
+    pub mirror: Option<MirrorConfig>,
     /// 请求 Header 转换策略引用（P2.1 新增）
     ///
     /// 转发前对请求头做 remove/set/add，策略定义在
@@ -149,6 +182,46 @@ fn default_path_type() -> PathType {
 }
 
 // ---------------------------------------------------------------------------
+// TrafficSplitConfig —— 灰度 / 蓝绿 / 加权路由（Phase 6）
+// ---------------------------------------------------------------------------
+
+/// 流量拆分配置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficSplitConfig {
+    /// 目标列表，按 weight 占比分流
+    #[serde(default)]
+    pub targets: Vec<TrafficTarget>,
+}
+
+/// 单个分流目标。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficTarget {
+    /// 目标 Service ID（必须存在于 services 列表）
+    pub service_id: String,
+    /// 权重，默认 1
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+}
+
+// ---------------------------------------------------------------------------
+// MirrorConfig —— 流量镜像（Phase 6）
+// ---------------------------------------------------------------------------
+
+/// 流量镜像配置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorConfig {
+    /// 影子 Service ID
+    pub service_id: String,
+    /// 镜像比例（0-100），默认 100
+    #[serde(default = "default_mirror_percentage")]
+    pub percentage: u8,
+}
+
+fn default_mirror_percentage() -> u8 {
+    100
+}
+
+// ---------------------------------------------------------------------------
 // ServiceConfig —— 后端服务配置
 // ---------------------------------------------------------------------------
 
@@ -159,6 +232,12 @@ pub struct ServiceConfig {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// 所属租户（Phase 7）
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// API 生命周期状态（Phase 7）
+    #[serde(default)]
+    pub lifecycle: LifecycleStatus,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// 关联的 Upstream ID
@@ -184,6 +263,12 @@ pub struct EndpointConfig {
     /// 所在可用区（Zone），用于区域感知负载均衡（P1）
     #[serde(default)]
     pub zone: Option<String>,
+    /// 所在地域（Region，Phase 7 多地域配置）
+    ///
+    /// 与 zone 的区别：region 是更大范围的容器（如 cn-east-1、cn-north-1），
+    /// 用于跨地域流量调度；zone 用于同地域内的机房感知。
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 fn default_weight() -> u32 {
@@ -202,6 +287,15 @@ pub struct UpstreamConfig {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// 所属租户（Phase 7）
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    /// 所属集群（Phase 7 多集群配置）
+    ///
+    /// 同一上游可部署在多个集群；控制面按 cluster_id 下发子集，
+    /// 数据面只加载属于自身集群的上游。
+    #[serde(default)]
+    pub cluster_id: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]
@@ -209,6 +303,69 @@ pub struct UpstreamConfig {
     /// Static Provider 的端点列表
     #[serde(default)]
     pub endpoints: Vec<EndpointConfig>,
+    /// 动态服务发现配置（Phase 6）。
+    ///
+    /// 未配置时按 Static 语义使用 `endpoints`；配置后由数据面后台任务
+    /// 定期刷新端点，并把结果写回运行时上游注册表。
+    #[serde(default)]
+    pub discovery: Option<DiscoveryConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// DiscoveryConfig —— 动态服务发现配置（Phase 6）
+// ---------------------------------------------------------------------------
+
+/// 上游动态服务发现配置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryConfig {
+    /// Provider 类型（dns / kubernetes）
+    #[serde(default)]
+    pub provider: DiscoveryProviderKind,
+    /// DNS 查询域名（provider=dns 时必填）
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// DNS 查询类型：a / srv（默认 a）
+    #[serde(default)]
+    pub dns_record: DnsRecordKind,
+    /// DNS 解析服务器，例如 `127.0.0.1:53`；为空时回退到 127.0.0.1:53
+    #[serde(default)]
+    pub dns_resolver: Option<String>,
+    /// Kubernetes 命名空间（provider=kubernetes 时必填）
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Kubernetes Service 名称（provider=kubernetes 时必填）
+    #[serde(default)]
+    pub service: Option<String>,
+    /// Kubernetes 端口名过滤
+    #[serde(default)]
+    pub port_name: Option<String>,
+    /// Kubernetes API Server 地址；为空时从 KUBERNETES_SERVICE_HOST 推导
+    #[serde(default)]
+    pub api_server: Option<String>,
+    /// ServiceAccount Token 文件路径（默认集群内标准路径）
+    #[serde(default)]
+    pub token_file: Option<String>,
+    /// CA 证书文件路径（默认集群内标准路径）
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    /// 刷新间隔（秒），默认 15
+    #[serde(default = "default_refresh_interval_secs")]
+    pub refresh_interval_secs: u64,
+}
+
+/// DNS 记录类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsRecordKind {
+    /// A / AAAA 主机记录（使用 upstream 的默认端口）
+    #[default]
+    A,
+    /// SRV 服务记录（端口由记录携带）
+    Srv,
+}
+
+fn default_refresh_interval_secs() -> u64 {
+    15
 }
 
 // ===========================================================================

@@ -18,6 +18,22 @@ gateway-common = { path = "../gateway-common" }
 gateway-core = { path = "../gateway-core" }
 
 async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# Kubernetes EndpointSlice Provider：访问 K8s API（HTTPS + Bearer Token）
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+serde_json = { workspace = true }
+http = { workspace = true }
+
+# TLS：rustls（不使用 openssl，避免运行环境依赖）
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 
 [dev-dependencies]
 tokio = { workspace = true }

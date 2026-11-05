@@ -176,6 +176,13 @@ impl Plugin for AuthPlugin {
             // 通过：写入身份（若有），继续后续插件
             Ok(identity) => {
                 if let Some(identity) = identity {
+                    // Phase 7：把身份摘要写回 RequestContext，
+                    // 供配额（Quota）、审计日志、门户分析消费
+                    ctx.ctx.consumer_id = identity
+                        .subject
+                        .clone()
+                        .or_else(|| identity.label.clone());
+                    ctx.ctx.tenant_id = identity.tenant_id.clone();
                     // 供 Authorization 阶段 / 后续业务插件读取；
                     // AuthIdentity 是 Clone + Send + Sync + 'static，满足 Extensions 约束
                     ctx.parts.extensions.insert(identity);

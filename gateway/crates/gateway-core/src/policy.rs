@@ -213,6 +213,9 @@ pub struct ApiKeyConfig {
     /// 标签（例如所属调用方名称），用于日志脱敏后的可读标识
     #[serde(default)]
     pub label: Option<String>,
+    /// 该 Key 所属租户（Phase 7 多租户）
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 /// serde 默认值：API Key 读取 Header 名。
@@ -272,9 +275,31 @@ pub struct RateLimitPolicyConfig {
     #[serde(default)]
     pub key: RateLimitKeySpec,
     /// 存储后端故障时的行为（Phase 2 为进程内计数，故障几乎不可能；
-    /// 为 Phase 3 接入 Redis 预留）。
+    /// Phase 3 接入 Redis 后由本字段决定 Redis 不可用时的策略）
     #[serde(default)]
     pub failure_mode: FailureMode,
+    /// 计数存储后端（Phase 6）
+    #[serde(default)]
+    pub backend: RateLimitBackend,
+    /// Redis 连接地址，例如 `redis://127.0.0.1:6379/0`
+    ///
+    /// `backend = redis` 时必填；`backend = local` 时忽略。
+    #[serde(default)]
+    pub redis_url: Option<String>,
+}
+
+/// 限流计数存储后端。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitBackend {
+    /// 进程内计数（默认，单实例语义）
+    #[default]
+    Local,
+    /// Redis 共享计数（多实例全局限流）
+    ///
+    /// Redis 后端使用固定窗口算法（`INCR` + `EXPIRE` 原子脚本），
+    /// `algorithm = token_bucket` 时会退化为固定窗口。
+    Redis,
 }
 
 /// 限流算法。
@@ -676,6 +701,159 @@ pub struct HeaderEntryConfig {
     pub name: String,
     /// Header 值
     pub value: String,
+}
+
+// ===========================================================================
+// WAF 策略（Phase 7）
+// ===========================================================================
+
+/// WAF 检查目标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WafTarget {
+    /// 路径（path）
+    Path,
+    /// 查询串（query）
+    Query,
+    /// 请求头值
+    Headers,
+    /// 请求体（需要 Runtime 预读；受 max_body_bytes 限制）
+    Body,
+}
+
+/// WAF 命中后的动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WafAction {
+    /// 阻断：返回 403
+    #[default]
+    Block,
+    /// 仅记录：放行但写审计日志与指标
+    Detect,
+}
+
+/// WAF 规则灵敏度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WafSensitivity {
+    /// 低：只匹配高置信度特征（默认）
+    #[default]
+    Low,
+    /// 中：增加常见攻击特征
+    Medium,
+    /// 高：更激进的正则（可能误报）
+    High,
+}
+
+/// WAF 策略配置。
+///
+/// 规则为内置 OWASP Core Rule Set 风格的特征集合（SQL 注入、XSS、
+/// 路径遍历、命令注入），不依赖外部规则引擎。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WafPolicyConfig {
+    /// 唯一 ID
+    pub id: String,
+    /// 人类可读名称
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 是否启用
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// 命中后的动作
+    #[serde(default)]
+    pub action: WafAction,
+    /// 灵敏度
+    #[serde(default)]
+    pub sensitivity: WafSensitivity,
+    /// 检查目标（默认 path + query + headers）
+    #[serde(default = "default_waf_targets")]
+    pub targets: Vec<WafTarget>,
+    /// 单请求体检查上限（字节），默认 1 MiB
+    #[serde(default = "default_waf_body_bytes")]
+    pub max_body_bytes: u64,
+}
+
+/// 默认检查目标：path / query / headers。
+fn default_waf_targets() -> Vec<WafTarget> {
+    vec![WafTarget::Path, WafTarget::Query, WafTarget::Headers]
+}
+
+/// 默认 body 检查上限（1 MiB）。
+fn default_waf_body_bytes() -> u64 {
+    1024 * 1024
+}
+
+// ===========================================================================
+// 配额策略（Phase 7）
+// ===========================================================================
+
+/// 配额周期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaPeriod {
+    /// 按天
+    #[default]
+    Daily,
+    /// 按月（按 30 天计算）
+    Monthly,
+}
+
+/// 配额维度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaScope {
+    /// 按租户（默认）：同一租户的所有请求共享配额
+    #[default]
+    Tenant,
+    /// 按消费者（认证身份主体）
+    Consumer,
+    /// 按路由
+    Route,
+}
+
+/// 配额策略配置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaPolicyConfig {
+    /// 唯一 ID
+    pub id: String,
+    /// 人类可读名称
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 是否启用
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// 周期
+    #[serde(default)]
+    pub period: QuotaPeriod,
+    /// 每周期允许的请求数
+    pub limit: u64,
+    /// 配额维度
+    #[serde(default)]
+    pub scope: QuotaScope,
+    /// 计数后端：local（进程内）或 redis（全局限额）
+    #[serde(default)]
+    pub backend: RateLimitBackend,
+    /// Redis 连接地址（backend=redis 时必填）
+    #[serde(default)]
+    pub redis_url: Option<String>,
+    /// 阈值告警比例（0-100），达到后写警告日志；默认 80
+    #[serde(default = "default_quota_warn_percent")]
+    pub warn_at_percent: u8,
+}
+
+/// 默认告警阈值 80%。
+fn default_quota_warn_percent() -> u8 {
+    80
+}
+
+impl QuotaPolicyConfig {
+    /// 周期长度（秒）。
+    pub fn period_secs(&self) -> u64 {
+        match self.period {
+            QuotaPeriod::Daily => 86_400,
+            QuotaPeriod::Monthly => 30 * 86_400,
+        }
+    }
 }
 
 // ===========================================================================
