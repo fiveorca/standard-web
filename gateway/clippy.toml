@@ -1,6 +1,0 @@
-# clippy.toml —— 额外的 clippy 配置。
-# 大部分规则已经在 workspace Cargo.toml 的 [workspace.lints.clippy] 中声明。
-# 这里留作项目级补充，例如：
-#   - forked_rustc — 当使用自定义 rustc 时避免误报
-#   - disallowed_types — 禁止使用 Box<dyn Any> 等
-# 目前无需额外配置。

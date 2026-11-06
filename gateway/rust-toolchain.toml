@@ -1,4 +1,0 @@
-# 锁定 Rust 工具链版本为 stable，不允许使用 nightly
-[toolchain]
-channel = "stable"
-components = ["rustfmt", "clippy"]
