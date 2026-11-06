@@ -109,6 +109,42 @@ impl UpstreamRegistry {
         self.entries.len()
     }
 
+    /// 读取某个上游的端点快照（健康检查探测目标 / 管理 API 展示）。
+    ///
+    /// 上游不存在时返回空列表。
+    pub async fn endpoints_of(&self, upstream_id: &str) -> Vec<Endpoint> {
+        match self.entries.get(upstream_id) {
+            Some(entry) => entry.upstream.read().await.endpoints.clone(),
+            None => Vec::new(),
+        }
+    }
+
+    /// 读取单个端点的当前健康状态（被动健康检查使用）。
+    pub async fn endpoint_status(
+        &self,
+        upstream_id: &str,
+        endpoint_id: &str,
+    ) -> Option<HealthStatus> {
+        let entry = self.entries.get(upstream_id)?;
+        let upstream = entry.upstream.read().await;
+        upstream
+            .endpoints
+            .iter()
+            .find(|ep| ep.runtime_id == endpoint_id)
+            .map(|ep| ep.status)
+    }
+
+    /// 列出所有上游的运行时状态（管理 API 展示端点健康情况）。
+    pub async fn list_upstreams(&self) -> Vec<Upstream> {
+        let mut result = Vec::with_capacity(self.entries.len());
+        for entry in self.entries.values() {
+            result.push(entry.upstream.read().await.clone());
+        }
+        // HashMap 遍历顺序不稳定，按 id 排序保证输出可预期
+        result.sort_by(|a, b| a.id.cmp(&b.id));
+        result
+    }
+
     /// 用动态发现的端点替换某个上游的端点集合（Phase 6 服务发现）。
     ///
     /// # 健康状态保留
@@ -272,6 +308,7 @@ mod tests {
                 })
                 .collect(),
             discovery: None,
+            health_check: None,
         }
     }
 

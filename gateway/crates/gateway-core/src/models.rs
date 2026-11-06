@@ -309,6 +309,197 @@ pub struct UpstreamConfig {
     /// 定期刷新端点，并把结果写回运行时上游注册表。
     #[serde(default)]
     pub discovery: Option<DiscoveryConfig>,
+    /// 健康检查配置。未配置时不做主动探测，端点保持乐观可用语义。
+    #[serde(default)]
+    pub health_check: Option<HealthCheckConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// HealthCheckConfig —— 主动 / 被动健康检查配置
+// ---------------------------------------------------------------------------
+
+/// 主动健康检查方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthCheckKind {
+    /// HTTP GET：要求状态码在期望范围内
+    #[default]
+    Http,
+    /// 仅建立 TCP 连接，不发送请求
+    Tcp,
+}
+
+impl std::fmt::Display for HealthCheckKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HealthCheckKind::Http => f.write_str("http"),
+            HealthCheckKind::Tcp => f.write_str("tcp"),
+        }
+    }
+}
+
+/// 主动 / 被动健康检查配置。
+///
+/// # 状态迁移规则
+///
+/// - 连续 `unhealthy_threshold` 次探测失败 → `UNHEALTHY`（摘流）
+/// - 连续 `healthy_threshold` 次探测成功 → `HEALTHY`（恢复）
+///
+/// 被动检查（请求失败 / 5xx）使用 `passive` 中的独立阈值，
+/// 与主动探测互不干扰，两者都可能改变端点状态。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheckConfig {
+    /// 是否启用主动健康检查
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// 探测方式
+    #[serde(default)]
+    pub kind: HealthCheckKind,
+    /// HTTP 探测路径（`kind = http` 时生效），默认 `/`
+    #[serde(default = "default_health_path")]
+    pub path: String,
+    /// 探测间隔（秒），默认 10
+    #[serde(default = "default_health_interval_secs")]
+    pub interval_secs: u64,
+    /// 单次探测超时（秒），默认 3
+    #[serde(default = "default_health_timeout_secs")]
+    pub timeout_secs: u64,
+    /// 连续失败多少次判定为不健康，默认 3
+    #[serde(default = "default_unhealthy_threshold")]
+    pub unhealthy_threshold: u32,
+    /// 连续成功多少次判定为恢复，默认 2
+    #[serde(default = "default_healthy_threshold")]
+    pub healthy_threshold: u32,
+    /// 期望状态码表达式；为空时接受 `200-399`。
+    ///
+    /// 支持两种形式（YAML 里都是字符串）：
+    /// - 单值：`"200"`
+    /// - 闭区间：`"200-299"`
+    #[serde(default)]
+    pub expected_status: Option<String>,
+    /// 被动健康检查配置
+    #[serde(default)]
+    pub passive: PassiveHealthConfig,
+}
+
+impl Default for HealthCheckConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            kind: HealthCheckKind::Http,
+            path: default_health_path(),
+            interval_secs: default_health_interval_secs(),
+            timeout_secs: default_health_timeout_secs(),
+            unhealthy_threshold: default_unhealthy_threshold(),
+            healthy_threshold: default_healthy_threshold(),
+            expected_status: None,
+            passive: PassiveHealthConfig::default(),
+        }
+    }
+}
+
+/// 被动健康检查配置。
+///
+/// 由真实请求结果驱动，无需额外探测流量：
+/// - 连接失败 / 超时 / 5xx 计为失败
+/// - 成功响应计为成功
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassiveHealthConfig {
+    /// 是否启用被动检查
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// 连续失败多少次摘流，默认 5
+    #[serde(default = "default_passive_failure_threshold")]
+    pub failure_threshold: u32,
+    /// 连续成功多少次恢复，默认 3
+    #[serde(default = "default_passive_recovery_threshold")]
+    pub recovery_threshold: u32,
+}
+
+impl Default for PassiveHealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            failure_threshold: default_passive_failure_threshold(),
+            recovery_threshold: default_passive_recovery_threshold(),
+        }
+    }
+}
+
+/// 解析期望状态码表达式为闭区间 `(min, max)`。
+///
+/// 支持的输入：
+/// - `"200"` → `(200, 200)`
+/// - `"200-299"` → `(200, 299)`
+///
+/// 返回 `Err` 表示表达式非法（非数字、范围颠倒、超出 HTTP 状态码范围）。
+pub fn parse_expected_status(expr: &str) -> Result<(u16, u16), String> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Err("empty status expression".to_string());
+    }
+
+    let parse_code = |s: &str| -> Result<u16, String> {
+        let code: u16 = s.trim().parse().map_err(|_| format!("invalid status code '{s}'"))?;
+        if !(100..=599).contains(&code) {
+            return Err(format!("status code {code} out of range 100-599"));
+        }
+        Ok(code)
+    };
+
+    match trimmed.split_once('-') {
+        Some((low, high)) => {
+            let low = parse_code(low)?;
+            let high = parse_code(high)?;
+            if low > high {
+                return Err(format!("status range {low}-{high} is inverted"));
+            }
+            Ok((low, high))
+        },
+        None => {
+            let code = parse_code(trimmed)?;
+            Ok((code, code))
+        },
+    }
+}
+
+/// 判断状态码是否被期望表达式接受。`None` 表达式接受 200–399。
+pub fn status_matches(expr: Option<&str>, status: u16) -> bool {
+    match expr {
+        Some(raw) => match parse_expected_status(raw) {
+            Ok((low, high)) => (low..=high).contains(&status),
+            Err(_) => false,
+        },
+        None => (200..400).contains(&status),
+    }
+}
+
+fn default_health_path() -> String {
+    "/".to_string()
+}
+
+fn default_health_interval_secs() -> u64 {
+    10
+}
+
+fn default_health_timeout_secs() -> u64 {
+    3
+}
+
+fn default_unhealthy_threshold() -> u32 {
+    3
+}
+
+fn default_healthy_threshold() -> u32 {
+    2
+}
+
+fn default_passive_failure_threshold() -> u32 {
+    5
+}
+
+fn default_passive_recovery_threshold() -> u32 {
+    3
 }
 
 // ---------------------------------------------------------------------------
@@ -485,5 +676,48 @@ impl RuntimeSnapshot {
             services_by_id: HashMap::new(),
             upstreams_by_id: HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_single_status_code() {
+        assert_eq!(parse_expected_status("200"), Ok((200, 200)));
+        assert_eq!(parse_expected_status(" 204 "), Ok((204, 204)));
+    }
+
+    #[test]
+    fn parses_status_range() {
+        assert_eq!(parse_expected_status("200-299"), Ok((200, 299)));
+        assert_eq!(parse_expected_status("500 - 599"), Ok((500, 599)));
+    }
+
+    #[test]
+    fn rejects_invalid_expressions() {
+        assert!(parse_expected_status("").is_err());
+        assert!(parse_expected_status("abc").is_err());
+        assert!(parse_expected_status("99").is_err());
+        assert!(parse_expected_status("600").is_err());
+        assert!(parse_expected_status("300-200").is_err());
+        assert!(parse_expected_status("200-x").is_err());
+    }
+
+    #[test]
+    fn status_matches_rules() {
+        // 无表达式：200–399
+        assert!(status_matches(None, 200));
+        assert!(status_matches(None, 301));
+        assert!(!status_matches(None, 404));
+        // 单值
+        assert!(status_matches(Some("200"), 200));
+        assert!(!status_matches(Some("200"), 201));
+        // 范围
+        assert!(status_matches(Some("200-299"), 250));
+        assert!(!status_matches(Some("200-299"), 300));
+        // 非法表达式一律视为不匹配
+        assert!(!status_matches(Some("bad"), 200));
     }
 }

@@ -11,10 +11,10 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
+use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::types::Json;
 use sqlx::{PgPool, Row};
-use serde_json::Value;
 
 use crate::error::StorageError;
 use crate::models::{
@@ -196,10 +196,7 @@ impl GatewayRepository for PostgresRepository {
              FROM {} WHERE id = $1 FOR UPDATE",
             kind.table()
         );
-        let row = sqlx::query(&select_sql)
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let row = sqlx::query(&select_sql).bind(id).fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
             return Err(StorageError::not_found(kind.as_str(), id));
         };
@@ -258,10 +255,7 @@ impl GatewayRepository for PostgresRepository {
         let mut tx = self.pool.begin().await?;
 
         let select_sql = format!("SELECT version FROM {} WHERE id = $1 FOR UPDATE", kind.table());
-        let row = sqlx::query(&select_sql)
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let row = sqlx::query(&select_sql).bind(id).fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
             return Err(StorageError::not_found(kind.as_str(), id));
         };

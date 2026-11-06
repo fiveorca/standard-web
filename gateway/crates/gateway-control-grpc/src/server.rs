@@ -48,7 +48,10 @@ pub struct ConfigDistributionService {
 impl ConfigDistributionService {
     /// 创建服务实例。
     pub fn new(service: Arc<ConfigService>) -> Self {
-        Self { service, instances: RwLock::new(HashMap::new()) }
+        Self {
+            service,
+            instances: RwLock::new(HashMap::new()),
+        }
     }
 
     /// 读取当前已注册实例快照（供 Admin API / 运维查询使用）。
@@ -75,9 +78,8 @@ impl ConfigDistributionService {
                             errors.len()
                         ))
                     })?;
-                let payload = serde_json::to_string(&snapshot).map_err(|e| {
-                    Status::internal(format!("failed to serialize snapshot: {e}"))
-                })?;
+                let payload = serde_json::to_string(&snapshot)
+                    .map_err(|e| Status::internal(format!("failed to serialize snapshot: {e}")))?;
                 Ok((record.version, record.checksum, Some(payload)))
             },
             Ok(None) => Ok((0, String::new(), None)),
@@ -131,7 +133,10 @@ impl ConfigDistribution for ConfigDistributionService {
             "data plane registered"
         );
 
-        Ok(Response::new(RegisterResponse { current_version: version, checksum }))
+        Ok(Response::new(RegisterResponse {
+            current_version: version,
+            checksum,
+        }))
     }
 
     /// 心跳：更新最近活跃时间，返回是否有比数据面已应用版本更新的配置。

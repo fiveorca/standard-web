@@ -29,16 +29,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use hyper::body::Incoming;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use hyper_rustls::HttpsConnector;
 use rustls::RootCertStore;
 use tokio::sync::Mutex;
 
-use gateway_core::{
-    DiscoveryError, DiscoveryHealth, EndpointConfig, ServiceDiscoveryProvider,
-};
+use gateway_core::{DiscoveryError, DiscoveryHealth, EndpointConfig, ServiceDiscoveryProvider};
 
 /// Kubernetes Provider 配置。
 #[derive(Debug, Clone)]
@@ -67,7 +65,8 @@ impl K8sDiscoveryConfig {
     /// 环境变量：
     /// - `KUBERNETES_SERVICE_HOST` / `KUBERNETES_SERVICE_PORT`
     pub fn in_cluster(namespace: impl Into<String>, service: impl Into<String>) -> Self {
-        let host = std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "kubernetes.default.svc".to_string());
+        let host = std::env::var("KUBERNETES_SERVICE_HOST")
+            .unwrap_or_else(|_| "kubernetes.default.svc".to_string());
         let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
         Self {
             api_server: format!("https://{host}:{port}"),
@@ -116,8 +115,8 @@ impl K8sDiscoveryProvider {
             })?;
             let mut cursor = std::io::Cursor::new(pem);
             for cert in rustls_pemfile::certs(&mut cursor) {
-                let der = cert
-                    .map_err(|e| DiscoveryError::Provider(format!("parse k8s ca pem: {e}")))?;
+                let der =
+                    cert.map_err(|e| DiscoveryError::Provider(format!("parse k8s ca pem: {e}")))?;
                 roots.add(der).map_err(|e| {
                     DiscoveryError::Provider(format!("invalid k8s ca certificate: {e}"))
                 })?;
@@ -145,10 +144,7 @@ impl K8sDiscoveryProvider {
     /// 读取 Bearer Token。
     fn read_token(&self) -> Result<String, DiscoveryError> {
         let token = std::fs::read_to_string(&self.config.token_file).map_err(|e| {
-            DiscoveryError::Provider(format!(
-                "read k8s token file {}: {e}",
-                self.config.token_file
-            ))
+            DiscoveryError::Provider(format!("read k8s token file {}: {e}", self.config.token_file))
         })?;
         Ok(token.trim().to_string())
     }
@@ -177,10 +173,7 @@ impl K8sDiscoveryProvider {
             .map_err(|e| DiscoveryError::Provider(format!("k8s api request failed: {e}")))?;
 
         if !resp.status().is_success() {
-            return Err(DiscoveryError::Provider(format!(
-                "k8s api returned {}",
-                resp.status()
-            )));
+            return Err(DiscoveryError::Provider(format!("k8s api returned {}", resp.status())));
         }
 
         let body = collect_body(resp.into_body()).await?;
@@ -235,9 +228,7 @@ impl ServiceDiscoveryProvider for K8sDiscoveryProvider {
     async fn health(&self) -> DiscoveryHealth {
         let guard = self.cache.lock().await;
         match guard.as_ref() {
-            Some(entry)
-                if entry.refreshed_at.elapsed() < self.config.refresh_interval * 3 =>
-            {
+            Some(entry) if entry.refreshed_at.elapsed() < self.config.refresh_interval * 3 => {
                 DiscoveryHealth::Healthy
             },
             Some(_) => DiscoveryHealth::Degraded,
@@ -263,7 +254,7 @@ async fn collect_body(mut body: Incoming) -> Result<Vec<u8>, DiscoveryError> {
 fn parse_endpointslices(
     text: &str,
     port_name: Option<&str>,
-    ) -> Result<Vec<EndpointConfig>, DiscoveryError> {
+) -> Result<Vec<EndpointConfig>, DiscoveryError> {
     let value: serde_json::Value = serde_json::from_str(text)
         .map_err(|e| DiscoveryError::Provider(format!("parse k8s json: {e}")))?;
     let items = value.get("items").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or(&[]);
@@ -314,10 +305,7 @@ fn parse_endpointslices(
                             port,
                             weight: 1,
                             // EndpointSlice 的 nodeName 可作为区域信息
-                            zone: ep
-                                .get("nodeName")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string),
+                            zone: ep.get("nodeName").and_then(|v| v.as_str()).map(str::to_string),
                             // EndpointSlice 无显式 region 字段
                             region: None,
                         });

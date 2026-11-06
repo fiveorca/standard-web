@@ -90,6 +90,13 @@ pub struct RequestContext {
     /// 认证身份所属租户（JWT tenant 声明 / API Key 绑定的租户）
     pub tenant_id: Option<String>,
 
+    // ---- 插件预置的响应头 ---- //
+    /// 请求阶段插件写入、需要合并到最终响应的 Header（如配额信息）。
+    ///
+    /// Runtime 在上游响应写回前统一合并；插件不要直接改 `headers`
+    /// （那是请求头）。
+    pub response_headers: HeaderMap,
+
     // ---- 错误（如果有）---- //
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -119,6 +126,7 @@ impl RequestContext {
             status_code: None,
             consumer_id: None,
             tenant_id: None,
+            response_headers: HeaderMap::new(),
             error_code: None,
             error_message: None,
         }

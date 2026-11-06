@@ -19,20 +19,20 @@ use async_trait::async_trait;
 use gateway_config::CompiledSnapshot;
 use gateway_control_api::{build_admin_router, AdminAuth, AdminState, Role};
 use gateway_control_service::{ConfigService, SnapshotApplier};
-use gateway_runtime::{Runtime, SnapshotStore};
+use gateway_runtime::Runtime;
 use gateway_storage::{connect_and_migrate, PoolSettings, PostgresRepository, SharedRepository};
 
 /// 把控制面快照应用到数据面的回调实现。
 struct RuntimeApplier {
-    /// 与数据面共享的快照存储
-    store: Arc<SnapshotStore>,
+    /// 数据面 Runtime（通过 `apply_snapshot` 同时热更新配置与 TLS 证书）
+    runtime: Arc<Runtime>,
 }
 
 #[async_trait]
 impl SnapshotApplier for RuntimeApplier {
     async fn apply(&self, snapshot: &CompiledSnapshot) -> Result<u64, String> {
-        // SnapshotStore::apply 是同步原子操作：校验版本单调后一次性替换
-        self.store.apply(snapshot).map_err(|e| e.to_string())
+        // Runtime::apply_snapshot 内部保证：版本校验 + 配置/TLS 两阶段原子提交
+        self.runtime.apply_snapshot(snapshot).map_err(|e| e.to_string())
     }
 }
 
@@ -68,9 +68,7 @@ pub async fn build_integrated_router(runtime: &Arc<Runtime>) -> Result<axum::Rou
         auth.add_spec(&spec, "viewer", Role::Viewer);
     }
     if !auth.is_configured() {
-        return Err(anyhow!(
-            "GATEWAY_ADMIN_TOKENS is required in integrated mode"
-        ));
+        return Err(anyhow!("GATEWAY_ADMIN_TOKENS is required in integrated mode"));
     }
 
     let instance_id =
@@ -78,7 +76,7 @@ pub async fn build_integrated_router(runtime: &Arc<Runtime>) -> Result<axum::Rou
     let service = ConfigService::with_applier(
         repo,
         Arc::new(RuntimeApplier {
-            store: runtime.snapshot_store(),
+            runtime: runtime.clone(),
         }),
         instance_id,
     );

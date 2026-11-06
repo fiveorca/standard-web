@@ -130,10 +130,7 @@ impl Plugin for AuthPlugin {
     }
 
     /// 执行鉴权。
-    async fn execute(
-        &self,
-        ctx: &mut PluginContext<'_>,
-    ) -> Result<PluginDecision, PluginError> {
+    async fn execute(&self, ctx: &mut PluginContext<'_>) -> Result<PluginDecision, PluginError> {
         // 1) 认证阶段在路由匹配之后执行；没有 route 说明 Runtime 装配顺序有误。
         //    此时无法确定该请求应适用哪条策略 → fail closed（不能默认放行）。
         let route = match ctx.route.as_ref() {
@@ -178,10 +175,8 @@ impl Plugin for AuthPlugin {
                 if let Some(identity) = identity {
                     // Phase 7：把身份摘要写回 RequestContext，
                     // 供配额（Quota）、审计日志、门户分析消费
-                    ctx.ctx.consumer_id = identity
-                        .subject
-                        .clone()
-                        .or_else(|| identity.label.clone());
+                    ctx.ctx.consumer_id =
+                        identity.subject.clone().or_else(|| identity.label.clone());
                     ctx.ctx.tenant_id = identity.tenant_id.clone();
                     // 供 Authorization 阶段 / 后续业务插件读取；
                     // AuthIdentity 是 Clone + Send + Sync + 'static，满足 Extensions 约束
@@ -352,8 +347,7 @@ mod tests {
         assert_eq!(challenge, "Basic realm=\"gateway\"");
 
         // 错误体与 Runtime 统一结构一致
-        let payload: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("json body");
+        let payload: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
         assert_eq!(payload["code"], "GATEWAY_AUTHENTICATION_FAILED");
         assert_eq!(payload["request_id"], "req-4");
     }

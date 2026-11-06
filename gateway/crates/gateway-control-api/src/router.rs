@@ -33,10 +33,7 @@ pub fn build_router(state: AdminState) -> Router {
                 .delete(handlers::delete_resource),
         )
         // consumers 别名路由（设计文档 8.5）
-        .route(
-            "/consumers",
-            get(handlers::list_consumers).post(handlers::create_consumer),
-        )
+        .route("/consumers", get(handlers::list_consumers).post(handlers::create_consumer))
         .route(
             "/consumers/{id}",
             get(handlers::get_consumer)
@@ -44,19 +41,13 @@ pub fn build_router(state: AdminState) -> Router {
                 .delete(handlers::delete_consumer),
         )
         // Consumer 嵌套凭据（设计文档 8.6）
-        .route(
-            "/consumers/{id}/credentials",
-            post(handlers::create_credential),
-        )
+        .route("/consumers/{id}/credentials", post(handlers::create_credential))
         .route(
             "/consumers/{consumer_id}/credentials/{credential_id}",
             delete(handlers::delete_credential),
         )
         // plugins 别名路由（设计文档 8.7）
-        .route(
-            "/plugins",
-            get(handlers::list_plugins).post(handlers::create_plugin),
-        )
+        .route("/plugins", get(handlers::list_plugins).post(handlers::create_plugin))
         .route(
             "/plugins/{id}",
             get(handlers::get_plugin)
@@ -74,10 +65,7 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/config/versions", get(handlers::list_versions))
         .route("/config/versions/latest", get(handlers::latest_version))
         .route("/config/versions/{version}", get(handlers::get_version))
-        .route(
-            "/config/versions/{version}/rollback",
-            post(handlers::rollback),
-        )
+        .route("/config/versions/{version}/rollback", post(handlers::rollback))
         // 审计与应用记录
         .route("/audit-logs", get(handlers::list_audit_logs))
         .route("/publish-records", get(handlers::list_publish_records))

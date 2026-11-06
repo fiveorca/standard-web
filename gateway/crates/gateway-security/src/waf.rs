@@ -60,10 +60,7 @@ impl CompiledWafPolicies {
                 return Err(format!("duplicate waf policy id '{}'", config.id));
             }
             if config.targets.is_empty() {
-                return Err(format!(
-                    "waf policy '{}': targets must not be empty",
-                    config.id
-                ));
+                return Err(format!("waf policy '{}': targets must not be empty", config.id));
             }
             if config.max_body_bytes == 0 {
                 return Err(format!(
@@ -167,10 +164,7 @@ impl Plugin for WafPlugin {
         if policy.targets.contains(&WafTarget::Headers) {
             for (name, value) in ctx.parts.headers.iter() {
                 // Host / Date 等基础头不参与特征匹配，减少误报
-                if matches!(
-                    name.as_str(),
-                    "host" | "date" | "content-length" | "content-type"
-                ) {
+                if matches!(name.as_str(), "host" | "date" | "content-length" | "content-type") {
                     continue;
                 }
                 let Ok(text) = value.to_str() else {
@@ -322,10 +316,7 @@ fn inspect(sensitivity: WafSensitivity, input: &str) -> Option<&'static str> {
     const LOW_CONFIDENCE: &[(&str, &str)] = &[("sqli", "--"), ("cmd", "|"), ("cmd", ";")];
 
     let matches = |rules: &'static [(&'static str, &'static str)]| -> Option<&'static str> {
-        rules
-            .iter()
-            .find(|(_, pattern)| lower.contains(pattern))
-            .map(|(rule, _)| *rule)
+        rules.iter().find(|(_, pattern)| lower.contains(pattern)).map(|(rule, _)| *rule)
     };
 
     if let Some(rule) = matches(HIGH_CONFIDENCE) {

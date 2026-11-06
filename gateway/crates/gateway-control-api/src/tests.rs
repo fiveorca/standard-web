@@ -41,9 +41,7 @@ fn request(method: Method, uri: &str, token: Option<&str>, body: Option<Value>) 
     match body {
         Some(value) => builder
             .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&value).expect("serialize request body"),
-            ))
+            .body(Body::from(serde_json::to_vec(&value).expect("serialize request body")))
             .expect("build request"),
         None => builder.body(Body::empty()).expect("build request"),
     }
@@ -52,12 +50,7 @@ fn request(method: Method, uri: &str, token: Option<&str>, body: Option<Value>) 
 async fn send(app: &axum::Router, request: Request<Body>) -> (StatusCode, Value) {
     let response = app.clone().oneshot(request).await.expect("send request");
     let status = response.status();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("collect body")
-        .to_bytes();
+    let bytes = response.into_body().collect().await.expect("collect body").to_bytes();
     let body = if bytes.is_empty() {
         Value::Null
     } else {
@@ -146,11 +139,8 @@ async fn health_is_public() {
 #[tokio::test]
 async fn missing_token_is_unauthorized() {
     let app = build_app();
-    let (status, body) = send(
-        &app,
-        request(Method::GET, "/api/admin/v1/resources/routes", None, None),
-    )
-    .await;
+    let (status, body) =
+        send(&app, request(Method::GET, "/api/admin/v1/resources/routes", None, None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["code"], "ADMIN_UNAUTHORIZED");
     assert!(!body["request_id"].as_str().unwrap_or_default().is_empty());
@@ -196,12 +186,7 @@ async fn resource_crud_and_not_found() {
     // 单条
     let (status, body) = send(
         &app,
-        request(
-            Method::GET,
-            &resource_uri("routes", "r-1"),
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::GET, &resource_uri("routes", "r-1"), Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -210,12 +195,7 @@ async fn resource_crud_and_not_found() {
     // 不存在
     let (status, body) = send(
         &app,
-        request(
-            Method::GET,
-            &resource_uri("routes", "missing"),
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::GET, &resource_uri("routes", "missing"), Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -224,19 +204,11 @@ async fn resource_crud_and_not_found() {
     // 未知资源类型
     let (status, body) = send(
         &app,
-        request(
-            Method::GET,
-            "/api/admin/v1/resources/unknown-kind",
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::GET, "/api/admin/v1/resources/unknown-kind", Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("unknown resource kind"));
+    assert!(body["message"].as_str().unwrap_or_default().contains("unknown resource kind"));
 }
 
 #[tokio::test]
@@ -278,12 +250,7 @@ async fn publish_invalid_config_returns_400_without_version() {
     // 没有版本被创建
     let (status, body) = send(
         &app,
-        request(
-            Method::GET,
-            "/api/admin/v1/config/versions/latest",
-            Some("viewer-token"),
-            None,
-        )
+        request(Method::GET, "/api/admin/v1/config/versions/latest", Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -298,12 +265,7 @@ async fn publish_success_exposes_version_and_audit() {
     // dry-run 校验（POST /config/validate，与设计文档第八章一致）
     let (status, body) = send(
         &app,
-        request(
-            Method::POST,
-            "/api/admin/v1/config/validate",
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::POST, "/api/admin/v1/config/validate", Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -326,11 +288,8 @@ async fn publish_success_exposes_version_and_audit() {
     assert_eq!(body["note"], "first publish");
 
     // 状态
-    let (status, body) = send(
-        &app,
-        request(Method::GET, "/api/admin/v1/status", Some("viewer-token"), None),
-    )
-    .await;
+    let (status, body) =
+        send(&app, request(Method::GET, "/api/admin/v1/status", Some("viewer-token"), None)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["published_version"], 1);
     assert_eq!(body["has_configuration"], true);
@@ -338,12 +297,7 @@ async fn publish_success_exposes_version_and_audit() {
     // 审计日志：3 次 create + 1 次 publish
     let (status, body) = send(
         &app,
-        request(
-            Method::GET,
-            "/api/admin/v1/audit-logs?limit=10",
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::GET, "/api/admin/v1/audit-logs?limit=10", Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -353,12 +307,7 @@ async fn publish_success_exposes_version_and_audit() {
     // 版本列表
     let (status, body) = send(
         &app,
-        request(
-            Method::GET,
-            "/api/admin/v1/config/versions",
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::GET, "/api/admin/v1/config/versions", Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -370,12 +319,7 @@ async fn viewer_reads_are_allowed() {
     let app = build_app();
     let (status, _) = send(
         &app,
-        request(
-            Method::GET,
-            "/api/admin/v1/publish-records",
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::GET, "/api/admin/v1/publish-records", Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -434,16 +378,8 @@ async fn config_endpoints_expose_current_compile_and_rollback() {
     let app = build_app();
 
     // 尚未发布时 GET /config → 404
-    let (status, body) = send(
-        &app,
-        request(
-            Method::GET,
-            "/api/admin/v1/config",
-            Some("viewer-token"),
-            None,
-        ),
-    )
-    .await;
+    let (status, body) =
+        send(&app, request(Method::GET, "/api/admin/v1/config", Some("viewer-token"), None)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "RESOURCE_NOT_FOUND");
 
@@ -452,12 +388,7 @@ async fn config_endpoints_expose_current_compile_and_rollback() {
     // 编译预览：不写版本，返回预计版本号与快照
     let (status, body) = send(
         &app,
-        request(
-            Method::POST,
-            "/api/admin/v1/config/compile",
-            Some("viewer-token"),
-            None,
-        ),
+        request(Method::POST, "/api/admin/v1/config/compile", Some("viewer-token"), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -481,16 +412,8 @@ async fn config_endpoints_expose_current_compile_and_rollback() {
     assert_eq!(body["version"], 1);
 
     // GET /config 返回当前版本与资源集合
-    let (status, body) = send(
-        &app,
-        request(
-            Method::GET,
-            "/api/admin/v1/config",
-            Some("viewer-token"),
-            None,
-        ),
-    )
-    .await;
+    let (status, body) =
+        send(&app, request(Method::GET, "/api/admin/v1/config", Some("viewer-token"), None)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["version"], 1);
     assert_eq!(body["resources"]["routes"][0]["id"], "r-1");

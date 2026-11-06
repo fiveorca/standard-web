@@ -18,10 +18,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gateway_core::{
-    DiscoveryConfig, DiscoveryProviderKind, DnsRecordKind, ServiceDiscoveryProvider,
-    UpstreamConfig,
+    DiscoveryConfig, DiscoveryProviderKind, DnsRecordKind, ServiceDiscoveryProvider, UpstreamConfig,
 };
-use gateway_discovery::{DnsDiscoveryConfig, DnsDiscoveryProvider, DnsQueryKind, K8sDiscoveryConfig, K8sDiscoveryProvider};
+use gateway_discovery::{
+    DnsDiscoveryConfig, DnsDiscoveryProvider, DnsQueryKind, K8sDiscoveryConfig,
+    K8sDiscoveryProvider,
+};
 
 use crate::state::SnapshotStore;
 
@@ -95,10 +97,7 @@ async fn run(store: Arc<SnapshotStore>) {
 
             match provider.resolve(&cfg.id).await {
                 Ok(endpoints) if !endpoints.is_empty() => {
-                    let count = state
-                        .upstream_registry
-                        .replace_endpoints(&cfg.id, endpoints)
-                        .await;
+                    let count = state.upstream_registry.replace_endpoints(&cfg.id, endpoints).await;
                     tracing::debug!(
                         target: "discovery",
                         upstream_id = %cfg.id,
@@ -153,11 +152,7 @@ fn build_provider(
                 .parse::<std::net::SocketAddr>()
                 .map_err(|e| format!("invalid dns_resolver: {e}"))?;
             // A 记录模式沿用静态端点里的端口作为默认端口
-            let default_port = upstream
-                .endpoints
-                .first()
-                .map(|ep| ep.port)
-                .unwrap_or(80);
+            let default_port = upstream.endpoints.first().map(|ep| ep.port).unwrap_or(80);
             let kind = match discovery.dns_record {
                 DnsRecordKind::A => DnsQueryKind::Address,
                 DnsRecordKind::Srv => DnsQueryKind::Srv,
@@ -172,16 +167,13 @@ fn build_provider(
         },
 
         DiscoveryProviderKind::Kubernetes => {
-            let namespace = discovery
-                .namespace
-                .clone()
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| "discovery.namespace is required for kubernetes provider".to_string())?;
-            let service = discovery
-                .service
-                .clone()
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| "discovery.service is required for kubernetes provider".to_string())?;
+            let namespace =
+                discovery.namespace.clone().filter(|v| !v.is_empty()).ok_or_else(|| {
+                    "discovery.namespace is required for kubernetes provider".to_string()
+                })?;
+            let service = discovery.service.clone().filter(|v| !v.is_empty()).ok_or_else(|| {
+                "discovery.service is required for kubernetes provider".to_string()
+            })?;
 
             // 以 in_cluster 的默认值为基线，再用显式配置覆盖
             let mut config = K8sDiscoveryConfig::in_cluster(namespace, service);

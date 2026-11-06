@@ -61,10 +61,7 @@ fn run_check(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 执行正常启动。
-async fn run_start(
-    config_path: &str,
-    mode: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_start(config_path: &str, mode: &str) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = match Runtime::load_from_path(config_path) {
         Ok(rt) => Arc::new(rt),
         Err(errors) => {
@@ -155,9 +152,7 @@ fn spawn_control_plane_sync(runtime: Arc<Runtime>) {
                     .sync_once(applied_version, move |snapshot| {
                         let rt = rt.clone();
                         async move {
-                            rt.apply_snapshot(&snapshot)
-                                .map(|_| ())
-                                .map_err(|err| err.to_string())
+                            rt.apply_snapshot(&snapshot).map(|_| ()).map_err(|err| err.to_string())
                         }
                     })
                     .await;

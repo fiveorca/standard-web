@@ -16,7 +16,7 @@
 name = "gateway-security"
 version = "0.1.0"
 edition = "2021"
-description = "API Gateway 鉴权能力：IP 黑白名单、Basic、API Key、JWT（静态密钥）"
+description = "API Gateway 鉴权能力：IP 黑白名单、Basic、API Key 生命周期、JWT（HMAC + JWKS）"
 license = "MIT"
 
 [dependencies]
@@ -27,10 +27,14 @@ gateway-plugin = { path = "../gateway-plugin" }
 
 # HTTP 基础类型：Parts / HeaderMap / Uri / StatusCode / HeaderValue / HeaderName
 http = { workspace = true }
-# JWT 解析与 HMAC 验签（只允许 HS256/HS384/HS512，白名单由策略决定）
+# JWT 解析与验签（HMAC / RSA / ECDSA，白名单由策略决定）
 jsonwebtoken = { workspace = true }
-# Basic 凭据的 base64 解码
+# Basic 凭据的 base64 解码 + API Key 随机密钥编码
 base64 = { workspace = true }
+# API Key 摘要存储（只保存 SHA-256，不保存明文）
+sha2 = { workspace = true }
+# API Key 生成时的随机数源（OsRng）
+rand = { workspace = true }
 # CIDR / 单 IP 网段匹配
 ipnet = { workspace = true }
 # 凭据比较的常量时间原语（防止时序侧信道）

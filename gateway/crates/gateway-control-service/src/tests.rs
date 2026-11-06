@@ -91,13 +91,9 @@ fn service() -> ConfigService {
 
 /// 创建一条最小可用配置：upstream → service → route。
 async fn seed_valid_config(svc: &ConfigService) {
-    svc.create_resource(
-        ResourceKind::Upstream,
-        draft("up-1", upstream_payload("up-1")),
-        "alice",
-    )
-    .await
-    .expect("create upstream");
+    svc.create_resource(ResourceKind::Upstream, draft("up-1", upstream_payload("up-1")), "alice")
+        .await
+        .expect("create upstream");
 
     svc.create_resource(
         ResourceKind::Service,
@@ -197,11 +193,7 @@ async fn rollback_replays_history_as_new_version() {
     // 回滚到 v1 → 产生 v3，且内容是 v1 的路径
     let v3 = svc.rollback(1, "bob", None).await.expect("rollback");
     assert_eq!(v3.version, 3);
-    assert_eq!(
-        v3.note.as_deref(),
-        Some("rollback to v1"),
-        "回滚备注应自动填充"
-    );
+    assert_eq!(v3.note.as_deref(), Some("rollback to v1"), "回滚备注应自动填充");
 
     let record = svc.get_version(3).await.expect("version 3");
     let bundle: ResourceBundle = serde_json::from_value(record.snapshot).expect("bundle");
@@ -212,11 +204,8 @@ async fn rollback_replays_history_as_new_version() {
 #[tokio::test]
 async fn apply_failure_is_recorded_but_version_kept() {
     let applier = Arc::new(RecordingApplier::new(true));
-    let svc = ConfigService::with_applier(
-        Arc::new(MemoryRepository::new()),
-        applier,
-        "gateway-test",
-    );
+    let svc =
+        ConfigService::with_applier(Arc::new(MemoryRepository::new()), applier, "gateway-test");
     seed_valid_config(&svc).await;
 
     let outcome = svc.publish("alice", None).await.expect("publish");
@@ -228,10 +217,7 @@ async fn apply_failure_is_recorded_but_version_kept() {
 
     let records = svc.list_publish_records(None, 10, 0).await.expect("records");
     assert_eq!(records.items.len(), 1);
-    assert_eq!(
-        records.items[0].status,
-        gateway_storage::PublishStatus::Failed
-    );
+    assert_eq!(records.items[0].status, gateway_storage::PublishStatus::Failed);
 }
 
 #[tokio::test]
@@ -296,4 +282,104 @@ async fn disabled_resource_is_applied_on_publish() {
     let bundle: ResourceBundle = serde_json::from_value(record.snapshot).expect("bundle");
     assert!(!bundle.routes[0].enabled);
     assert_eq!(bundle.routes[0].path_value, "/api");
+}
+
+// ---------------------------------------------------------------------------
+// 证书资源：真实 PEM 校验 + 私钥脱敏 + 读改写恢复
+// ---------------------------------------------------------------------------
+
+/// 生成测试用自签名证书，返回 `(cert_pem, key_pem)`。
+fn test_certificate(domain: &str) -> (String, String) {
+    let generated = rcgen::generate_simple_self_signed(vec![domain.to_string()])
+        .expect("generate self-signed certificate");
+    (generated.cert.pem(), generated.key_pair.serialize_pem())
+}
+
+fn certificate_payload(id: &str, cert_pem: &str, key_pem: &str) -> Value {
+    json!({
+        "id": id,
+        "cert_pem": cert_pem,
+        "key_pem": key_pem,
+        "domains": ["api.example.com"]
+    })
+}
+
+#[tokio::test]
+async fn certificate_private_key_is_redacted_in_reads() {
+    let (cert_pem, key_pem) = test_certificate("api.example.com");
+    let svc = service();
+    svc.create_resource(
+        ResourceKind::Certificate,
+        draft("cert-1", certificate_payload("cert-1", &cert_pem, &key_pem)),
+        "alice",
+    )
+    .await
+    .expect("create certificate");
+
+    // 读取时私钥必须脱敏，证书链保持可见
+    let fetched = svc.get_resource(ResourceKind::Certificate, "cert-1").await.expect("get");
+    assert_eq!(fetched.payload["key_pem"], "[redacted]");
+    assert_eq!(fetched.payload["cert_pem"], cert_pem);
+
+    // 列表同样脱敏
+    let page = svc.list_resources(ResourceKind::Certificate, 10, 0).await.expect("list");
+    assert_eq!(page.items[0].payload["key_pem"], "[redacted]");
+}
+
+#[tokio::test]
+async fn update_with_redacted_key_keeps_stored_private_key() {
+    let (cert_pem, key_pem) = test_certificate("api.example.com");
+    let svc = service();
+    svc.create_resource(
+        ResourceKind::Certificate,
+        draft("cert-1", certificate_payload("cert-1", &cert_pem, &key_pem)),
+        "alice",
+    )
+    .await
+    .expect("create certificate");
+
+    // 模拟 GET → 修改其他字段 → PUT：私钥是脱敏占位符
+    let mut payload = certificate_payload("cert-1", &cert_pem, "[redacted]");
+    payload["domains"] = json!(["api.example.com", "www.example.com"]);
+    svc.update_resource(
+        ResourceKind::Certificate,
+        "cert-1",
+        ResourceUpdate {
+            name: Some("renamed".into()),
+            enabled: None,
+            payload: Some(payload),
+            expected_version: Some(1),
+        },
+        "alice",
+    )
+    .await
+    .expect("update");
+
+    // 仓储中的真实私钥必须保持不变
+    let stored = svc
+        .repository()
+        .get_resource(ResourceKind::Certificate, "cert-1")
+        .await
+        .expect("repo get")
+        .expect("cert exists");
+    assert_eq!(stored.payload["key_pem"], key_pem);
+    assert_eq!(stored.payload["domains"].as_array().unwrap().len(), 2);
+    assert_eq!(stored.name.as_deref(), Some("renamed"));
+}
+
+#[tokio::test]
+async fn certificate_with_mismatched_key_is_rejected() {
+    let (cert_pem, _) = test_certificate("api.example.com");
+    let (_, other_key) = test_certificate("other.example.com");
+    let svc = service();
+
+    let err = svc
+        .create_resource(
+            ResourceKind::Certificate,
+            draft("cert-1", certificate_payload("cert-1", &cert_pem, &other_key)),
+            "alice",
+        )
+        .await
+        .expect_err("mismatched key must be rejected");
+    assert!(matches!(err, ControlError::InvalidPayload { .. }));
 }

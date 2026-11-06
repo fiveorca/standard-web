@@ -30,7 +30,11 @@ pub struct Cli {
     pub grpc_bind: String,
 
     /// PostgreSQL 连接串
-    #[arg(long = "database-url", value_name = "URL", env = "GATEWAY_DATABASE_URL")]
+    #[arg(
+        long = "database-url",
+        value_name = "URL",
+        env = "GATEWAY_DATABASE_URL"
+    )]
     pub database_url: Option<String>,
 
     /// 使用进程内内存仓储（数据重启即丢失，仅用于演示/测试）
@@ -38,11 +42,19 @@ pub struct Cli {
     pub memory: bool,
 
     /// 管理员 token 清单，格式 `token:actor, token2:actor2`
-    #[arg(long = "admin-tokens", value_name = "SPEC", env = "GATEWAY_ADMIN_TOKENS")]
+    #[arg(
+        long = "admin-tokens",
+        value_name = "SPEC",
+        env = "GATEWAY_ADMIN_TOKENS"
+    )]
     pub admin_tokens: Option<String>,
 
     /// 只读 token 清单，格式同 admin-tokens
-    #[arg(long = "viewer-tokens", value_name = "SPEC", env = "GATEWAY_VIEWER_TOKENS")]
+    #[arg(
+        long = "viewer-tokens",
+        value_name = "SPEC",
+        env = "GATEWAY_VIEWER_TOKENS"
+    )]
     pub viewer_tokens: Option<String>,
 
     /// 日志级别（trace / debug / info / warn / error）

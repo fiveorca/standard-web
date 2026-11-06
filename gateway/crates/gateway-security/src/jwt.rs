@@ -1,19 +1,25 @@
-//! JWT 认证 —— **静态密钥 + 算法白名单**方案。
+//! JWT 认证 —— **算法白名单 + 静态密钥 / JWKS** 方案。
 //!
 //! # 方案边界（与需求文档的对应关系）
 //!
-//! 需求 §4.4 要求实现 11 项 JWT 校验能力。Phase 2 采用静态 HMAC 密钥：
+//! 需求 §4.4 要求实现 11 项 JWT 校验能力：
 //!
 //! | 需求项 | 本实现 |
 //! |---|---|
 //! | Token 格式验证 | `decode_header` + `decode` 双重解析 |
-//! | 签名验证 | `jsonwebtoken::decode`（HMAC-SHA256/384/512） |
+//! | 签名验证 | `jsonwebtoken::decode`（HMAC / RSA / ECDSA） |
 //! | 过期时间验证 | `exp`（必填，`leeway` 容忍时钟漂移） |
 //! | Not Before 验证 | `nbf`（存在时校验） |
 //! | Issuer 验证 | 配置 `issuer` 时精确匹配 |
 //! | Audience 验证 | 配置 `audience` 时精确匹配 |
 //! | 算法白名单 | `algorithms` 白名单 + 显式 header 预检 |
-//! | Key ID / JWKS / Rotation / 撤销 | 静态密钥方案不适用，留待 Phase 3 |
+//! | Key ID / JWKS / Rotation | `jwks` 内联文档 + 按 `kid` 选公钥 |
+//! | 撤销 | 依赖 Token 短期有效（`exp`）；长期身份用 API Key 吊销 |
+//!
+//! # 密钥来源
+//!
+//!   - `HS256/384/512`：策略上的静态共享密钥 `secret`
+//!   - `RS256/384/512`、`ES256/384`：`jwks` 文档中的公钥，按 `kid` 选择
 //!
 //! # 关键安全决策
 //!
@@ -21,12 +27,14 @@
 //!    `decode_header` 先把 `alg` 解析成**枚举**，`none` 与其他算法在
 //!    反序列化阶段就失败；随后还要求 `alg` 落在配置白名单内。
 //!    这同时防住了 `alg: none` 伪造与 `alg` 混淆攻击。
-//! 2. **`aud` 语义必须显式**：`jsonwebtoken` 默认 `validate_aud = true`，
+//! 2. **未知 `kid` 直接拒绝**：不在 JWKS 中回退"逐把公钥试一遍"，
+//!    避免密钥混淆。
+//! 3. **`aud` 语义必须显式**：`jsonwebtoken` 默认 `validate_aud = true`，
 //!    未配置 `aud` 时携带 `aud` 的 Token 会被判非法。本实现按策略语义
 //!    显式设置 `validate_aud`，避免"未配置却拒绝合法 Token"的意外。
-//! 3. **失败信息统一化**：对外只返回 `invalid JWT`，不区分"过期/签名错/
+//! 4. **失败信息统一化**：对外只返回 `invalid JWT`，不区分"过期/签名错/
 //!    iss 不匹配"，避免给攻击者提供校验预言机；细节只写 debug 日志。
-//! 4. **密钥与 Token 绝不进入日志**。
+//! 5. **密钥与 Token 绝不进入日志**。
 
 use std::borrow::Cow;
 
@@ -35,6 +43,7 @@ use http::{HeaderMap, HeaderName, Uri};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 
+use crate::jwks::JwksKeySet;
 use crate::model::{AuthIdentity, AuthMechanism, AuthRejection, Credential};
 
 /// 401 时使用的 `WWW-Authenticate` 挑战。
@@ -47,7 +56,13 @@ const BEARER_CHALLENGE: &str = "Bearer";
 ///   - 调用点字段名可读，不会把 `required` 与 `validate_exp` 传反
 pub struct JwtSettings<'a> {
     /// HMAC 静态密钥（按 UTF-8 字节直接作为 key material）
-    pub secret: &'a str,
+    ///
+    /// 算法白名单包含 `HS*` 时必填；仅配置非对称算法时可为 `None`。
+    pub secret: Option<&'a str>,
+    /// 内联 JWKS 文档（JSON）
+    ///
+    /// 算法白名单包含 `RS*`/`ES*` 时必填。
+    pub jwks: Option<&'a str>,
     /// 算法白名单（**不能为空**）
     pub algorithms: &'a [JwtAlgorithm],
     /// 期望的签发者（`iss`）
@@ -68,8 +83,12 @@ pub struct JwtSettings<'a> {
 
 /// 已编译的 JWT 策略。
 pub struct JwtPolicy {
-    /// 密钥字节（启动期从配置复制，运行期只读；不参与 Debug 输出）
-    secret: Vec<u8>,
+    /// HMAC 密钥字节（启动期从配置复制，运行期只读；不参与 Debug 输出）
+    ///
+    /// 仅配置非对称算法时为 `None`。
+    secret: Option<Vec<u8>>,
+    /// JWKS 公钥集合（编译期解析一次并常驻，即"缓存"）
+    jwks: Option<JwksKeySet>,
     /// 算法白名单（jsonwebtoken 枚举形式）
     algorithms: Vec<Algorithm>,
     /// 算法白名单（字符串形式，仅用于日志）
@@ -95,8 +114,9 @@ impl std::fmt::Debug for JwtPolicy {
             .field("required", &self.required)
             .field("header_name", &self.header_name)
             .field("query_param", &self.query_param)
-            // 只暴露密钥长度，不暴露内容
-            .field("secret_len", &self.secret.len())
+            // 只暴露密钥长度与 JWKS 密钥数量，不暴露内容
+            .field("secret_len", &self.secret.as_ref().map(Vec::len))
+            .field("jwks_keys", &self.jwks.as_ref().map(JwksKeySet::len))
             .finish()
     }
 }
@@ -109,7 +129,8 @@ impl JwtPolicy {
     ///
     /// 返回 `Err` 时整条策略拒绝加载：
     ///   - 算法白名单为空
-    ///   - 密钥缺失/过短（与 `gateway-config` 的 validator 采用同一阈值）
+    ///   - 白名单包含 `HS*` 但未提供密钥 / 密钥过短
+    ///   - 白名单包含 `RS*`/`ES*` 但未提供或无法解析 `jwks`
     ///   - Header 名非法
     pub fn compile(settings: JwtSettings<'_>) -> Result<Self, String> {
         // 1) 算法白名单不能为空：空白名单没有任何校验意义
@@ -117,13 +138,39 @@ impl JwtPolicy {
             return Err("algorithms must not be empty".into());
         }
 
-        // 2) 静态 HMAC 密钥必须足够长（32 字节 ≈ 256 bit，匹配 HS256 强度）
-        if settings.secret.is_empty() {
-            return Err("secret must not be empty".into());
-        }
-        if settings.secret.len() < 32 {
-            return Err("secret must be at least 32 bytes (HMAC security)".into());
-        }
+        let needs_hmac = settings.algorithms.iter().any(|alg| alg.is_hmac());
+        let needs_jwks = settings.algorithms.iter().any(|alg| !alg.is_hmac());
+
+        // 2) 算法与密钥来源必须匹配：
+        //    - HS* 需要静态密钥（32 字节 ≈ 256 bit，匹配 HS256 强度）
+        //    - RS*/ES* 需要 JWKS 公钥集合
+        let secret = match settings.secret {
+            Some(secret) => {
+                if secret.is_empty() {
+                    return Err("secret must not be empty".into());
+                }
+                if needs_hmac && secret.len() < 32 {
+                    return Err("secret must be at least 32 bytes (HMAC security)".into());
+                }
+                Some(secret.as_bytes().to_vec())
+            },
+            None => {
+                if needs_hmac {
+                    return Err("secret is required for HS256/HS384/HS512".into());
+                }
+                None
+            },
+        };
+
+        let jwks = match settings.jwks {
+            Some(document) => Some(JwksKeySet::parse(document)?),
+            None => {
+                if needs_jwks {
+                    return Err("jwks is required for RS*/ES* algorithms".into());
+                }
+                None
+            },
+        };
 
         // 3) Header 名在启动期就校验，避免每次请求都解析失败
         let header_name = HeaderName::from_bytes(settings.header_name.as_bytes())
@@ -180,7 +227,8 @@ impl JwtPolicy {
         }
 
         Ok(Self {
-            secret: settings.secret.as_bytes().to_vec(),
+            secret,
+            jwks,
             algorithms,
             algorithm_names,
             required: settings.required,
@@ -242,8 +290,23 @@ impl JwtPolicy {
             return Err(invalid_token());
         }
 
-        // 4) 验签 + 声明校验（exp / nbf / iss / aud 全部由 `Validation` 实施）
-        let key = DecodingKey::from_secret(&self.secret);
+        // 4) 按算法族选择验签密钥：
+        //    - HS*：静态共享密钥
+        //    - RS*/ES*：JWKS 中按 kid 选公钥（未知 kid 直接拒绝）
+        let key = match select_key(
+            &header.alg,
+            self.secret.as_deref(),
+            self.jwks.as_ref(),
+            header.kid.as_deref(),
+        ) {
+            Ok(key) => key,
+            Err(reason) => {
+                tracing::debug!(target: "security", reason = %reason, "jwt key selection failed");
+                return Err(invalid_token());
+            },
+        };
+
+        // 5) 验签 + 声明校验（exp / nbf / iss / aud 全部由 `Validation` 实施）
         let data = match decode::<Value>(token.as_ref(), &key, &self.validation) {
             Ok(data) => data,
             Err(err) => {
@@ -252,7 +315,7 @@ impl JwtPolicy {
             },
         };
 
-        // 5) 身份只取 `sub`：其余声明（含 Token 原文）绝不进入身份结构
+        // 6) 身份只取 `sub`：其余声明（含 Token 原文）绝不进入身份结构
         let mut identity = AuthIdentity::new(AuthMechanism::Jwt);
         if let Some(subject) = data.claims.get("sub").and_then(Value::as_str) {
             identity = identity.with_subject(subject);
@@ -337,22 +400,47 @@ fn invalid_token() -> AuthRejection {
     AuthRejection::unauthenticated("invalid JWT").with_challenge(BEARER_CHALLENGE)
 }
 
+/// 按 Token 算法选择验签密钥。
+///
+/// - `HS*` → 静态共享密钥
+/// - `RS*` / `ES*` → JWKS 中按 `kid` 选公钥
+///
+/// 任一来源缺失或选择失败都返回 `Err`，由调用方统一映射为 401。
+fn select_key(
+    alg: &Algorithm,
+    secret: Option<&[u8]>,
+    jwks: Option<&JwksKeySet>,
+    kid: Option<&str>,
+) -> Result<DecodingKey, String> {
+    match alg {
+        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
+            let secret = secret.ok_or_else(|| "HMAC secret is not configured".to_string())?;
+            Ok(DecodingKey::from_secret(secret))
+        },
+        _ => {
+            let jwks = jwks.ok_or_else(|| "JWKS is not configured".to_string())?;
+            jwks.decoding_key(kid, *alg)
+        },
+    }
+}
+
 /// `JwtAlgorithm` → `jsonwebtoken::Algorithm`。
 fn jsonwebtoken_algorithm(alg: JwtAlgorithm) -> Algorithm {
     match alg {
         JwtAlgorithm::Hs256 => Algorithm::HS256,
         JwtAlgorithm::Hs384 => Algorithm::HS384,
         JwtAlgorithm::Hs512 => Algorithm::HS512,
+        JwtAlgorithm::Rs256 => Algorithm::RS256,
+        JwtAlgorithm::Rs384 => Algorithm::RS384,
+        JwtAlgorithm::Rs512 => Algorithm::RS512,
+        JwtAlgorithm::Es256 => Algorithm::ES256,
+        JwtAlgorithm::Es384 => Algorithm::ES384,
     }
 }
 
 /// `JwtAlgorithm` → 字符串（日志/自检用）。
 fn jwt_algorithm_name(alg: JwtAlgorithm) -> &'static str {
-    match alg {
-        JwtAlgorithm::Hs256 => "HS256",
-        JwtAlgorithm::Hs384 => "HS384",
-        JwtAlgorithm::Hs512 => "HS512",
-    }
+    alg.as_str()
 }
 
 #[cfg(test)]
@@ -367,7 +455,8 @@ mod tests {
     /// 辅助：构造默认策略（HS256 白名单，required = true，无 iss/aud）
     fn policy(required: bool) -> JwtPolicy {
         JwtPolicy::compile(JwtSettings {
-            secret: std::str::from_utf8(SECRET).expect("ascii secret"),
+            secret: Some(std::str::from_utf8(SECRET).expect("ascii secret")),
+            jwks: None,
             algorithms: &[JwtAlgorithm::Hs256],
             issuer: None,
             audience: None,
@@ -382,12 +471,8 @@ mod tests {
 
     /// 辅助：签发 Token（默认 HS256）
     fn sign(claims: Value) -> String {
-        encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &EncodingKey::from_secret(SECRET),
-        )
-        .expect("token should be signed")
+        encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET))
+            .expect("token should be signed")
     }
 
     /// 辅助：把 Token 放进 Authorization: Bearer 头
@@ -502,7 +587,8 @@ mod tests {
     #[test]
     fn issuer_and_audience_are_enforced_when_configured() {
         let settings = |issuer: Option<&'static str>, audience: Option<&'static str>| JwtSettings {
-            secret: std::str::from_utf8(SECRET).expect("ascii secret"),
+            secret: Some(std::str::from_utf8(SECRET).expect("ascii secret")),
+            jwks: None,
             algorithms: &[JwtAlgorithm::Hs256],
             issuer,
             audience,
@@ -555,7 +641,8 @@ mod tests {
             "sub": "alice", "exp": jsonwebtoken::get_current_timestamp() + 3600
         }));
         let policy = JwtPolicy::compile(JwtSettings {
-            secret: std::str::from_utf8(SECRET).expect("ascii secret"),
+            secret: Some(std::str::from_utf8(SECRET).expect("ascii secret")),
+            jwks: None,
             algorithms: &[JwtAlgorithm::Hs256],
             issuer: None,
             audience: None,
@@ -567,9 +654,7 @@ mod tests {
         })
         .expect("policy should compile");
 
-        let uri: Uri = format!("/path?access_token={token}")
-            .parse()
-            .expect("valid uri");
+        let uri: Uri = format!("/path?access_token={token}").parse().expect("valid uri");
         assert!(policy.verify(&HeaderMap::new(), &uri).is_ok());
     }
 
@@ -577,7 +662,8 @@ mod tests {
     #[test]
     fn invalid_settings_are_rejected() {
         let base = JwtSettings {
-            secret: std::str::from_utf8(SECRET).expect("ascii secret"),
+            secret: Some(std::str::from_utf8(SECRET).expect("ascii secret")),
+            jwks: None,
             algorithms: &[JwtAlgorithm::Hs256],
             issuer: None,
             audience: None,
@@ -588,8 +674,149 @@ mod tests {
             validate_exp: true,
         };
 
-        assert!(JwtPolicy::compile(JwtSettings { algorithms: &[], ..base }).is_err());
-        assert!(JwtPolicy::compile(JwtSettings { secret: "short", ..base }).is_err());
-        assert!(JwtPolicy::compile(JwtSettings { header_name: "bad header", ..base }).is_err());
+        assert!(JwtPolicy::compile(JwtSettings {
+            algorithms: &[],
+            ..base
+        })
+        .is_err());
+        assert!(JwtPolicy::compile(JwtSettings {
+            secret: Some("short"),
+            ..base
+        })
+        .is_err());
+        assert!(JwtPolicy::compile(JwtSettings {
+            header_name: "bad header",
+            ..base
+        })
+        .is_err());
+
+        // 非对称算法缺少 JWKS 必须失败
+        assert!(JwtPolicy::compile(JwtSettings {
+            secret: None,
+            jwks: None,
+            algorithms: &[JwtAlgorithm::Rs256],
+            ..base
+        })
+        .is_err());
+        // 非法 JWKS 文档必须失败
+        assert!(JwtPolicy::compile(JwtSettings {
+            secret: None,
+            jwks: Some("not-json"),
+            algorithms: &[JwtAlgorithm::Rs256],
+            ..base
+        })
+        .is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // JWKS / 非对称算法
+    // -----------------------------------------------------------------
+
+    /// 测试用 2048-bit RSA 私钥（仅测试夹具，绝不可用于生产）
+    const RSA_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDmktaIh2p/7vuG
+ZkmgNXj1ZDqnZfMt+WbwRFZZD1K505LfgiMxeg4fLZVCtGZD8o58t1G+g2bCMDbL
+UrPFW7iKzcvvvt17aALmXTCIHAguwl0sr6esbLI1zvkFnPsmCVyyhGtvmINkNvtm
+DKvKgyy4vyWsuuTgIbc4PvJ8LK1/E7GnyPzWiHcT1Iy2pM7cDsd495hL6vnz9XPF
+TDebY9tSPwoijfnxsmI4cLEAPATO+UYnM34x+Y0WwQ/Ahow4iAt5VzIf7SAKlRZH
+7h/6yJ0QMpFbr+rlXOUDK4nBJwJmZUG3CsmIoH1hIDkXVCdDHdfhyH3sap+q09tI
+JKqX0lQrAgMBAAECggEAEL6PzzEWWN1qwriMQZLgiow8KN/3KFrjpjCFnMjHbIX4
+NTxm1eGpQ4u0j+LjR61GZQ7jDtTNZ5jHbJNASZApogWOo9sr4Rm37DF5pB4fsgBH
+cpv8WeyNhz7VSBpoWrt0pzov8IDA5KGMNuhV/spGkHwWflQW6aKegvp/SD6ZCDtV
+7fvpIHpT8AbBHDJXuh6a/WYGN4Zwuyila9JuafhhvUu6uYBAnBrI+AckbS2BMa8f
+Y/lTNzdXNTNIm7IaQ173+OXZmKUSx9ekNFJHGr01YeX5iZnNwTTeU+WL0ed/ggI6
+hJNpaQ1hE3erjIcRur/SHJWpfM+O948NJaCKM3eFcQKBgQD6zPHzC+j0xkbdGiym
+o3khhWlqsSN8ucQUIIwVS9sffjQvWmSiOKy3GLJMFMPcQ8bYprXYunbLj2jd2JyU
+OUHn4amXOEXjjtUlmUb7F5ZA8WErSJ3UoOz0K/4IXmIObaHGXeTbCtuOlFu8f8gI
+Iq3rMPYXIAEg37bEZ7sznjepbwKBgQDrWos1KRHzIiBcgoAxl2D7noOezQ35ksNc
+my8bJy91ogwSntW2caigm/2N0XBtuWcVTPVRGLRcznaK0gBiD8ZV8juLtbN1mA5T
+gzy1YcNwt0E9Ev+eQ29/6gK9jTEZwhedjPf/GuX8/ZFeR7odhdX4SY8gIU6BULBT
+aBW03i/LBQKBgAjjyNO3oVtDx/FAY0LI2ptQkksA2mQqZYPdH3oFxU+ZdpoTFywU
+3DJlQrSlq8eb82lsh1eWTG2suKfcbLhoSyi/+/XrPbbyMiXyB+0QifflVm9lVIrb
+5WpGQOvlBI7EXg6c92a4PM4R/ipxURLQv99tTdvF+6RBqcXOc3lB63ErAoGAVpUy
+zVXUoquVWDMyUgwsw6SnK06oq34QnQsCI20hCpeY9Wi1mq7pqFx6xSedwuAISk/L
+mBAMmm/iMGPdfDXtc0TwHw+ze7l628JWHSxgKCFiwMMygtiwNlCyvWUqAR3kbjOk
+MJeGsLHgPt0IXUAVXYhCPUHDjdNPav/JrIZo8rkCgYEAi3L6b5T/fPs6MsvX7h+D
+XfJL8p+E6qJ0LkYMmKrQUMrKkodW1REuCpE68ou5kLFPB2gWsYUMAHD0KukRAVwx
+LWdPcH50VhwpnUT9+M5NNdjs/4NbcZtUuatlEPmp7ji6TUHV+zNs5Hp4k4x0BHpo
+eK1ue9D+5nqe6lA775ZSK6M=
+-----END PRIVATE KEY-----"#;
+
+    /// 与测试私钥配对的 JWKS（两个 kid 指向同一公钥，用于验证轮换期间新旧 kid 并存）
+    fn rsa_jwks() -> String {
+        let n = "5pLWiIdqf-77hmZJoDV49WQ6p2XzLflm8ERWWQ9SudOS34IjMXoOHy2VQrRmQ_KOfLdRvoNmwjA2y1KzxVu4is3L777de2gC5l0wiBwILsJdLK-nrGyyNc75BZz7JglcsoRrb5iDZDb7ZgyryoMsuL8lrLrk4CG3OD7yfCytfxOxp8j81oh3E9SMtqTO3A7HePeYS-r58_VzxUw3m2PbUj8KIo358bJiOHCxADwEzvlGJzN-MfmNFsEPwIaMOIgLeVcyH-0gCpUWR-4f-sidEDKRW6_q5VzlAyuJwScCZmVBtwrJiKB9YSA5F1QnQx3X4ch97GqfqtPbSCSql9JUKw";
+        format!(
+            r#"{{"keys":[
+                {{"kty":"RSA","alg":"RS256","kid":"rsa-old","use":"sig","n":"{n}","e":"AQAB"}},
+                {{"kty":"RSA","alg":"RS256","kid":"rsa-new","use":"sig","n":"{n}","e":"AQAB"}}
+            ]}}"#
+        )
+    }
+
+    /// 辅助：用测试私钥签发 RS256 Token
+    fn sign_rsa(kid: Option<&str>) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = kid.map(str::to_string);
+        encode(
+            &header,
+            &json!({ "sub": "alice", "exp": jsonwebtoken::get_current_timestamp() + 3600 }),
+            &EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).expect("rsa key"),
+        )
+        .expect("rsa token should be signed")
+    }
+
+    /// 辅助：JWKS 策略（仅 RS256，无静态密钥）
+    fn rsa_policy() -> JwtPolicy {
+        let jwks = rsa_jwks();
+        JwtPolicy::compile(JwtSettings {
+            secret: None,
+            jwks: Some(&jwks),
+            algorithms: &[JwtAlgorithm::Rs256],
+            issuer: None,
+            audience: None,
+            leeway_secs: 0,
+            required: true,
+            header_name: "Authorization",
+            query_param: None,
+            validate_exp: true,
+        })
+        .expect("rsa policy should compile")
+    }
+
+    /// JWKS 验签通过，且支持新旧 kid 并存（密钥轮换）
+    #[test]
+    fn jwks_verifies_rsa_token_by_kid() {
+        let policy = rsa_policy();
+
+        for kid in ["rsa-old", "rsa-new"] {
+            let token = sign_rsa(Some(kid));
+            let identity = policy
+                .verify(&bearer_headers(&token), &empty_uri())
+                .expect("token should verify")
+                .expect("identity");
+            assert_eq!(identity.subject.as_deref(), Some("alice"));
+        }
+    }
+
+    /// 未知 kid / 缺少 kid（多把兼容密钥）都必须拒绝
+    #[test]
+    fn jwks_rejects_unknown_or_ambiguous_kid() {
+        let policy = rsa_policy();
+
+        let unknown = sign_rsa(Some("rsa-unknown"));
+        assert!(policy.verify(&bearer_headers(&unknown), &empty_uri()).is_err());
+
+        // 两把兼容公钥 + 无 kid → 不能猜
+        let no_kid = sign_rsa(None);
+        assert!(policy.verify(&bearer_headers(&no_kid), &empty_uri()).is_err());
+    }
+
+    /// 用 HS256 签发的 Token 无法通过 RS256 白名单（算法混淆防御）
+    #[test]
+    fn jwks_policy_rejects_hmac_token() {
+        let policy = rsa_policy();
+        let hmac_token =
+            sign(json!({ "sub": "mallory", "exp": jsonwebtoken::get_current_timestamp() + 3600 }));
+        assert!(policy.verify(&bearer_headers(&hmac_token), &empty_uri()).is_err());
     }
 }

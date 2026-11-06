@@ -388,26 +388,11 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let chain = PluginChain::new(vec![
             // priority 100，名字 z → 最后执行
-            Arc::new(TestPlugin::new(
-                "zeta",
-                PluginPhase::Authentication,
-                100,
-                log.clone(),
-            )),
+            Arc::new(TestPlugin::new("zeta", PluginPhase::Authentication, 100, log.clone())),
             // priority 10，名字 b
-            Arc::new(TestPlugin::new(
-                "beta",
-                PluginPhase::Authentication,
-                10,
-                log.clone(),
-            )),
+            Arc::new(TestPlugin::new("beta", PluginPhase::Authentication, 10, log.clone())),
             // priority 10，名字 a → 最先执行
-            Arc::new(TestPlugin::new(
-                "alpha",
-                PluginPhase::Authentication,
-                10,
-                log.clone(),
-            )),
+            Arc::new(TestPlugin::new("alpha", PluginPhase::Authentication, 10, log.clone())),
         ]);
 
         let mut parts = make_parts();
@@ -425,22 +410,12 @@ mod tests {
     async fn short_circuit_stops_later_plugins() {
         let log = Arc::new(Mutex::new(Vec::new()));
 
-        let mut blocker = TestPlugin::new(
-            "deny",
-            PluginPhase::Authentication,
-            10,
-            log.clone(),
-        );
+        let mut blocker = TestPlugin::new("deny", PluginPhase::Authentication, 10, log.clone());
         blocker.short_circuit = true;
 
         let chain = PluginChain::new(vec![
             Arc::new(blocker),
-            Arc::new(TestPlugin::new(
-                "after",
-                PluginPhase::Authentication,
-                20,
-                log.clone(),
-            )),
+            Arc::new(TestPlugin::new("after", PluginPhase::Authentication, 20, log.clone())),
         ]);
 
         let mut parts = make_parts();
@@ -459,18 +434,12 @@ mod tests {
     #[tokio::test]
     async fn plugin_error_aborts_chain() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut failing =
-            TestPlugin::new("broken", PluginPhase::Authentication, 10, log.clone());
+        let mut failing = TestPlugin::new("broken", PluginPhase::Authentication, 10, log.clone());
         failing.fail = true;
 
         let chain = PluginChain::new(vec![
             Arc::new(failing),
-            Arc::new(TestPlugin::new(
-                "never",
-                PluginPhase::Authentication,
-                20,
-                log.clone(),
-            )),
+            Arc::new(TestPlugin::new("never", PluginPhase::Authentication, 20, log.clone())),
         ]);
 
         let mut parts = make_parts();
@@ -496,12 +465,7 @@ mod tests {
             .expect("first register should succeed");
 
         let err = registry
-            .register(Arc::new(TestPlugin::new(
-                "dup",
-                PluginPhase::Authentication,
-                10,
-                log,
-            )))
+            .register(Arc::new(TestPlugin::new("dup", PluginPhase::Authentication, 10, log)))
             .expect_err("second register should fail");
         assert!(matches!(err, PluginError::DuplicateName { .. }));
     }
@@ -520,12 +484,7 @@ mod tests {
             )))
             .expect("register auth");
         registry
-            .register(Arc::new(TestPlugin::new(
-                "cors",
-                PluginPhase::ResponsePreClient,
-                20,
-                log,
-            )))
+            .register(Arc::new(TestPlugin::new("cors", PluginPhase::ResponsePreClient, 20, log)))
             .expect("register cors");
 
         let chain = registry.chain_for_phase(PluginPhase::Authentication);
@@ -544,11 +503,7 @@ mod tests {
         let mut parts = make_parts();
         let mut ctx = RequestContext::new(RequestId::new());
         let mut pctx = PluginContext::new(&mut parts, &mut ctx, None, None);
-        assert!(chain
-            .run(&mut pctx)
-            .await
-            .expect("empty chain")
-            .is_continue());
+        assert!(chain.run(&mut pctx).await.expect("empty chain").is_continue());
     }
 
     /// 响应方向插件可以修改响应头；请求方向拿不到 response
@@ -670,9 +625,7 @@ mod tests {
             inits: AtomicUsize::new(0),
         });
         let mut registry = PluginRegistry::new();
-        registry
-            .register(counting.clone())
-            .expect("register counting");
+        registry.register(counting.clone()).expect("register counting");
         registry.init_all().await.expect("init should succeed");
         assert_eq!(counting.inits.load(Ordering::SeqCst), 1);
     }

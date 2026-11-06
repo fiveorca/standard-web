@@ -7,58 +7,61 @@
 //! # 安全要点
 //!   1. **Header 优先于 Query**：同时存在时以 Header 为准，避免攻击者用
 //!      Query 覆盖合法 Header
-//!   2. 全部 Key 使用常量时间比较，且遍历完整个列表（不因命中而提前退出）
-//!   3. `label` 用于日志（调用方名称），**Key 原文绝不进入身份或日志**
+//!   2. 校验交给 [`ApiKeyStore`]：只比较 SHA-256 摘要，
+//!      支持过期 / 吊销 / 作用域，并累计使用次数
+//!   3. `label` / `consumer_id` 用于日志与身份，**Key 原文绝不进入身份或日志**
 //!   4. Query 方式默认关闭：URL 会进入访问日志、浏览器历史与 Referer，
 //!      只有明确配置 `query_param` 才启用
+//!
+//! # 拒绝语义
+//!   - 不存在 / 过期 / 吊销：统一 401，不暴露具体原因
+//!   - 作用域不足：403（身份已证明，但权限不够）
 
 use std::borrow::Cow;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gateway_core::ApiKeyConfig;
 use http::{HeaderMap, HeaderName, Uri};
-use subtle::Choice;
 
-use crate::model::{
-    constant_time_eq_str, AuthIdentity, AuthMechanism, AuthRejection,
-};
+use crate::api_key_store::{ApiKeyStore, ApiKeyVerifyError};
+use crate::model::{AuthIdentity, AuthMechanism, AuthRejection};
 
 /// 已编译的 API Key 策略。
 #[derive(Debug, Clone)]
 pub struct ApiKeyPolicy {
-    /// 允许的 Key 列表（含可选 label）
-    keys: Vec<ApiKeyConfig>,
+    /// 生命周期存储（只读索引 + 原子用量计数）
+    store: Arc<ApiKeyStore>,
     /// 读取 Key 的 Header 名称（启动期解析为 `HeaderName`，避免每次请求重新校验）
     header_name: HeaderName,
     /// 可选的 Query 参数名（`None` 表示不允许从 Query 读取）
     query_param: Option<String>,
+    /// 必须同时具备的作用域
+    required_scopes: Vec<String>,
 }
 
 impl ApiKeyPolicy {
     /// 编译 API Key 策略。
     ///
     /// 参数：
-    /// - `keys`：允许的 Key 列表
+    /// - `keys`：Key 条目（明文或 SHA-256 摘要）
     /// - `header_name`：读取 Key 的 Header 名称
     /// - `query_param`：可选的 Query 参数名
+    /// - `required_scopes`：要求 Key 具备的作用域（空表示不校验）
     ///
     /// 返回 `Err` 时整条策略拒绝加载。
     pub fn compile(
         keys: &[ApiKeyConfig],
         header_name: &str,
         query_param: Option<&str>,
+        required_scopes: &[String],
     ) -> Result<Self, String> {
         if keys.is_empty() {
             return Err("keys must not be empty".into());
         }
 
-        let mut compiled = Vec::with_capacity(keys.len());
-        for (idx, key) in keys.iter().enumerate() {
-            // 空 Key 会匹配空字符串，属于危险配置，必须在启动期拒绝
-            if key.key.is_empty() {
-                return Err(format!("keys[{idx}].key must not be empty"));
-            }
-            compiled.push(key.clone());
-        }
+        // 编译期完成摘要计算与重复校验；明文不会进入存储
+        let store = ApiKeyStore::from_configs(keys, now_secs())?;
 
         // `HeaderName::from_bytes` 会拒绝非法字符（空格、冒号等）
         let header_name = HeaderName::from_bytes(header_name.as_bytes())
@@ -71,11 +74,23 @@ impl ApiKeyPolicy {
             }
         }
 
+        for scope in required_scopes {
+            if scope.is_empty() {
+                return Err("required_scopes entries must not be empty".into());
+            }
+        }
+
         Ok(Self {
-            keys: compiled,
+            store: Arc::new(store),
             header_name,
             query_param: query_param.map(str::to_string),
+            required_scopes: required_scopes.to_vec(),
         })
+    }
+
+    /// 只读访问生命周期存储（诊断 / 管理接口用）。
+    pub fn store(&self) -> &ApiKeyStore {
+        &self.store
     }
 
     /// 校验请求携带的 API Key。
@@ -85,43 +100,48 @@ impl ApiKeyPolicy {
     /// - `uri`：请求 URI（Query 方式需要）
     ///
     /// 返回：
-    /// - `Ok(identity)`：Key 有效，`label` 来自配置
-    /// - `Err(rejection)`：缺失或无效（401）
-    pub fn verify(
-        &self,
-        headers: &HeaderMap,
-        uri: &Uri,
-    ) -> Result<AuthIdentity, AuthRejection> {
+    /// - `Ok(identity)`：Key 有效；`subject` 为绑定的 Consumer ID
+    /// - `Err(rejection)`：缺失或无效（401）、作用域不足（403）
+    pub fn verify(&self, headers: &HeaderMap, uri: &Uri) -> Result<AuthIdentity, AuthRejection> {
         // 1) 抽取 Key：不存在的由 lookup 返回 401（缺失）
         let provided = self.lookup(headers, uri)?;
 
-        // 2) 常量时间遍历全部 Key：
-        //    即使已命中也不提前结束，防止"Key 在列表中的位置"影响响应时间
-        let mut matched = Choice::from(0);
-        let mut label: Option<String> = None;
-        // 命中的 Key 所绑定的租户（Phase 7）
-        let mut tenant: Option<String> = None;
-        for key in &self.keys {
-            let eq = constant_time_eq_str(provided.as_ref(), &key.key);
-            matched |= eq;
-            // 命中后记录 label（label 是非机密展示名，可安全用于日志）
-            if bool::from(eq) {
-                label = key.label.clone();
-                tenant = key.tenant_id.clone();
-            }
+        // 2) 生命周期校验（摘要比对 + 过期/吊销检查 + 用量累计）
+        let meta = match self.store.verify(provided.as_ref(), now_secs()) {
+            Ok(meta) => meta,
+            Err(reason) => {
+                // 细分原因只进 debug 日志：对外必须统一，避免存在性预言机
+                tracing::debug!(
+                    target: "security",
+                    reason = %reason,
+                    "api key rejected"
+                );
+                return match reason {
+                    ApiKeyVerifyError::ScopeMissing(scope) => Err(AuthRejection::forbidden(
+                        format!("API key is missing required scope '{scope}'"),
+                    )),
+                    _ => Err(AuthRejection::unauthenticated("invalid API key")),
+                };
+            },
+        };
+
+        // 3) 作用域校验（身份已证明 → 403）
+        if let Err(scope) = meta.has_scopes(&self.required_scopes) {
+            return Err(AuthRejection::forbidden(format!(
+                "API key is missing required scope '{scope}'"
+            )));
         }
 
-        if !bool::from(matched) {
-            return Err(AuthRejection::unauthenticated("invalid API key"));
-        }
-
-        // 3) 身份只承载 label：Key 原文属于机密，严禁进入身份结构
+        // 4) 身份只承载非机密标识：Key 原文严禁进入身份结构
         let mut identity = AuthIdentity::new(AuthMechanism::ApiKey);
-        if let Some(label) = label {
+        // Consumer 绑定：作为主体写回，供配额 / 审计 / 分析使用
+        if let Some(consumer) = meta.consumer_id {
+            identity = identity.with_subject(consumer);
+        }
+        if let Some(label) = meta.label {
             identity = identity.with_label(label);
         }
-        // API Key 绑定的租户写入身份，供配额与审计使用
-        if let Some(tenant) = tenant {
+        if let Some(tenant) = meta.tenant_id {
             identity = identity.with_tenant(tenant);
         }
         Ok(identity)
@@ -165,12 +185,17 @@ impl ApiKeyPolicy {
     }
 }
 
+/// 当前 Unix 时间（秒）。
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use http::header::HeaderValue;
 
-    /// 辅助：构造策略
+    /// 辅助：构造策略（单 Key、无作用域要求）
     fn policy(keys: &[&str], query_param: Option<&str>) -> ApiKeyPolicy {
         let configs: Vec<ApiKeyConfig> = keys
             .iter()
@@ -178,10 +203,10 @@ mod tests {
             .map(|(idx, key)| ApiKeyConfig {
                 key: (*key).to_string(),
                 label: Some(format!("caller-{idx}")),
-                tenant_id: None,
+                ..ApiKeyConfig::default()
             })
             .collect();
-        ApiKeyPolicy::compile(&configs, "X-API-Key", query_param)
+        ApiKeyPolicy::compile(&configs, "X-API-Key", query_param, &[])
             .expect("api key policy should compile")
     }
 
@@ -204,11 +229,10 @@ mod tests {
     #[test]
     fn header_key_passes_with_label() {
         let policy = policy(&["k-1", "k-2"], None);
-        let identity = policy
-            .verify(&headers_with_key("k-2"), &empty_uri())
-            .expect("key should match");
+        let identity =
+            policy.verify(&headers_with_key("k-2"), &empty_uri()).expect("key should match");
         assert_eq!(identity.mechanism, AuthMechanism::ApiKey);
-        // subject 绝不能是 Key 原文
+        // 未绑定 Consumer 时 subject 为空；绝不能是 Key 原文
         assert!(identity.subject.is_none());
         assert_eq!(identity.label.as_deref(), Some("caller-1"));
     }
@@ -228,9 +252,7 @@ mod tests {
     fn query_is_ignored_when_not_configured() {
         let policy = policy(&["k-1"], None);
         let uri: Uri = "/path?api_key=k-1".parse().expect("valid uri");
-        let err = policy
-            .verify(&HeaderMap::new(), &uri)
-            .expect_err("query must be ignored");
+        let err = policy.verify(&HeaderMap::new(), &uri).expect_err("query must be ignored");
         assert_eq!(err.status, http::StatusCode::UNAUTHORIZED);
     }
 
@@ -239,21 +261,90 @@ mod tests {
     fn query_key_is_accepted_when_configured() {
         let policy = policy(&["k 1"], Some("api_key"));
         let uri: Uri = "/path?api_key=k%201".parse().expect("valid uri");
-        let identity = policy
-            .verify(&HeaderMap::new(), &uri)
-            .expect("decoded query key should match");
+        let identity =
+            policy.verify(&HeaderMap::new(), &uri).expect("decoded query key should match");
         assert_eq!(identity.label.as_deref(), Some("caller-0"));
+    }
+
+    /// Consumer 绑定 / 租户 / 作用域 / 过期 在策略层生效
+    #[test]
+    fn lifecycle_metadata_is_enforced() {
+        let configs = vec![
+            ApiKeyConfig {
+                key: "k-ok".into(),
+                id: Some("ok".into()),
+                consumer_id: Some("consumer-a".into()),
+                tenant_id: Some("tenant-1".into()),
+                scopes: vec!["orders:read".into()],
+                ..ApiKeyConfig::default()
+            },
+            ApiKeyConfig {
+                key: "k-expired".into(),
+                id: Some("expired".into()),
+                expires_at: Some(1),
+                ..ApiKeyConfig::default()
+            },
+            ApiKeyConfig {
+                key: "k-revoked".into(),
+                id: Some("revoked".into()),
+                revoked: true,
+                ..ApiKeyConfig::default()
+            },
+        ];
+        let policy = ApiKeyPolicy::compile(&configs, "X-API-Key", None, &["orders:read".into()])
+            .expect("policy should compile");
+
+        let identity = policy.verify(&headers_with_key("k-ok"), &empty_uri()).expect("valid key");
+        assert_eq!(identity.subject.as_deref(), Some("consumer-a"));
+        assert_eq!(identity.tenant_id.as_deref(), Some("tenant-1"));
+
+        // 过期与吊销统一 401
+        assert_eq!(
+            policy
+                .verify(&headers_with_key("k-expired"), &empty_uri())
+                .expect_err("expired")
+                .status,
+            http::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            policy
+                .verify(&headers_with_key("k-revoked"), &empty_uri())
+                .expect_err("revoked")
+                .status,
+            http::StatusCode::UNAUTHORIZED
+        );
+
+        // 用量计数在每次成功校验后累计
+        let (used, last_used) = policy.store().usage("ok").expect("usage");
+        assert_eq!(used, 1);
+        assert!(last_used.is_some());
+    }
+
+    /// 作用域不足 → 403
+    #[test]
+    fn missing_scope_is_forbidden() {
+        let configs = vec![ApiKeyConfig {
+            key: "k".into(),
+            id: Some("k".into()),
+            scopes: vec!["orders:read".into()],
+            ..ApiKeyConfig::default()
+        }];
+        let policy = ApiKeyPolicy::compile(&configs, "X-API-Key", None, &["orders:write".into()])
+            .expect("policy should compile");
+        let err = policy
+            .verify(&headers_with_key("k"), &empty_uri())
+            .expect_err("scope must be required");
+        assert_eq!(err.status, http::StatusCode::FORBIDDEN);
     }
 
     /// 空 Key 列表 / 非法 Header 名 必须编译失败
     #[test]
     fn invalid_config_is_rejected() {
-        assert!(ApiKeyPolicy::compile(&[], "X-API-Key", None).is_err());
+        assert!(ApiKeyPolicy::compile(&[], "X-API-Key", None, &[]).is_err());
         let keys = vec![ApiKeyConfig {
             key: "k".into(),
-            label: None,
-            tenant_id: None,
+            ..ApiKeyConfig::default()
         }];
-        assert!(ApiKeyPolicy::compile(&keys, "bad header", None).is_err());
+        assert!(ApiKeyPolicy::compile(&keys, "bad header", None, &[]).is_err());
     }
 }

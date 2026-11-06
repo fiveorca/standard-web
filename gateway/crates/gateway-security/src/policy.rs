@@ -97,10 +97,12 @@ impl CompiledAuthPolicy {
                     keys,
                     header_name,
                     query_param,
+                    required_scopes,
                 } => AuthPolicyKind::ApiKey(ApiKeyPolicy::compile(
                     keys,
                     header_name,
                     query_param.as_deref(),
+                    required_scopes,
                 )?),
 
                 // ---- JWT ----
@@ -114,23 +116,20 @@ impl CompiledAuthPolicy {
                     header_name,
                     query_param,
                     validate_exp,
-                } => {
-                    // 静态密钥方案下 secret 必填（validator 已校验，这里再兜底一次）
-                    let secret = secret
-                        .as_deref()
-                        .ok_or_else(|| "secret is required for JWT policies".to_string())?;
-                    AuthPolicyKind::Jwt(Box::new(JwtPolicy::compile(JwtSettings {
-                        secret,
-                        algorithms,
-                        issuer: issuer.as_deref(),
-                        audience: audience.as_deref(),
-                        leeway_secs: *leeway_secs,
-                        required: *required,
-                        header_name,
-                        query_param: query_param.as_deref(),
-                        validate_exp: *validate_exp,
-                    })?))
-                },
+                    jwks,
+                } => AuthPolicyKind::Jwt(Box::new(JwtPolicy::compile(JwtSettings {
+                    // 密钥来源由策略内部校验：HS* 需要 secret，RS*/ES* 需要 jwks
+                    secret: secret.as_deref(),
+                    jwks: jwks.as_deref(),
+                    algorithms,
+                    issuer: issuer.as_deref(),
+                    audience: audience.as_deref(),
+                    leeway_secs: *leeway_secs,
+                    required: *required,
+                    header_name,
+                    query_param: query_param.as_deref(),
+                    validate_exp: *validate_exp,
+                })?)),
             }
         };
 
@@ -182,9 +181,9 @@ impl CompiledAuthPolicy {
             },
 
             // Basic 固定从 Authorization 头读取（RFC 7617）
-            AuthPolicyKind::Basic(policy) => policy
-                .verify(view.headers.get(AUTHORIZATION))
-                .map(Some),
+            AuthPolicyKind::Basic(policy) => {
+                policy.verify(view.headers.get(AUTHORIZATION)).map(Some)
+            },
 
             // API Key：Header 优先，可回退 Query
             AuthPolicyKind::ApiKey(policy) => policy.verify(view.headers, view.uri).map(Some),
@@ -321,10 +320,7 @@ mod tests {
         );
         // 客户端地址缺失：不能证明被允许 → 拒绝
         assert_eq!(
-            policy
-                .evaluate(&view(&headers, &uri, None))
-                .expect_err("unknown ip")
-                .status,
+            policy.evaluate(&view(&headers, &uri, None)).expect_err("unknown ip").status,
             http::StatusCode::FORBIDDEN
         );
     }
@@ -386,13 +382,10 @@ mod tests {
             name: None,
             enabled: true,
             spec: AuthPolicySpec::ApiKey {
-                keys: vec![ApiKeyConfig {
-                    key: String::new(),
-                    label: None,
-                    tenant_id: None,
-                }],
+                keys: vec![ApiKeyConfig::default()],
                 header_name: "X-API-Key".into(),
                 query_param: None,
+                required_scopes: Vec::new(),
             },
         };
         assert!(CompiledAuthPolicies::compile(&[bad_key]).is_err());

@@ -212,10 +212,7 @@ impl PluginResponse {
     pub fn json(status: StatusCode, body: Bytes) -> Self {
         // 空 HeaderMap 上 insert 一定成功；`HeaderValue::from_static` 为编译期校验
         let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Self {
             status,
             headers,

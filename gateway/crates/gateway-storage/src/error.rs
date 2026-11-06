@@ -33,9 +33,7 @@ pub enum StorageError {
     ///
     /// 控制面允许更新时携带 `expected_version`，防止两个管理员基于旧版本
     /// 互相覆盖。版本不匹配时返回该错误。
-    #[error(
-        "resource version conflict: {kind}/{id} expected {expected}, actual {actual}"
-    )]
+    #[error("resource version conflict: {kind}/{id} expected {expected}, actual {actual}")]
     VersionConflict {
         /// 资源类型
         kind: String,

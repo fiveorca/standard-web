@@ -101,8 +101,8 @@ mod tests {
     /// CIDR 与单 IP 混用都能正确匹配
     #[test]
     fn matches_cidr_and_single_ip() {
-        let matcher = CidrMatcher::compile(&entries(&["10.0.0.0/8", "192.168.1.5"]))
-            .expect("valid cidrs");
+        let matcher =
+            CidrMatcher::compile(&entries(&["10.0.0.0/8", "192.168.1.5"])).expect("valid cidrs");
         assert!(matcher.contains("10.1.2.3".parse().expect("ipv4")));
         assert!(matcher.contains("192.168.1.5".parse().expect("ipv4")));
         assert!(!matcher.contains("192.168.1.6".parse().expect("ipv4")));
@@ -112,8 +112,8 @@ mod tests {
     /// IPv6 网段匹配，且 IPv4 地址不会误命中 IPv6 段
     #[test]
     fn ipv6_matching_is_family_aware() {
-        let matcher = CidrMatcher::compile(&entries(&["::1/128", "fe80::/10"]))
-            .expect("valid ipv6 cidrs");
+        let matcher =
+            CidrMatcher::compile(&entries(&["::1/128", "fe80::/10"])).expect("valid ipv6 cidrs");
         assert!(matcher.contains("::1".parse().expect("ipv6")));
         assert!(matcher.contains("fe80::abcd".parse().expect("ipv6")));
         // IPv4 地址与 IPv6 段属于不同地址族

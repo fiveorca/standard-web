@@ -75,16 +75,11 @@ impl CompiledTransformPolicies {
                 return Err(format!("transform[{idx}].id must not be empty"));
             }
             if by_id.contains_key(&config.id) {
-                return Err(format!(
-                    "duplicate transform policy id '{}'",
-                    config.id
-                ));
+                return Err(format!("duplicate transform policy id '{}'", config.id));
             }
 
             let compiled = CompiledTransformPolicy::compile(config)
-                .map_err(|reason| {
-                    format!("transform[{idx}] ('{}'): {reason}", config.id)
-                })?;
+                .map_err(|reason| format!("transform[{idx}] ('{}'): {reason}", config.id))?;
             by_id.insert(config.id.clone(), compiled);
         }
 
@@ -140,14 +135,12 @@ impl CompiledTransformPolicy {
     ///
     /// 返回 `Err` 当某个 Header 值替换后仍非法（CR/LF/NUL）；
     /// 此时不应用任何更改（原子性：要么全部成功，要么全部不变）。
-    pub fn apply(
-        &self,
-        headers: &mut http::HeaderMap,
-        env: &PlaceholderEnv,
-    ) -> Result<(), String> {
+    pub fn apply(&self, headers: &mut http::HeaderMap, env: &PlaceholderEnv) -> Result<(), String> {
         // 先渲染所有 set / add 的值，检查合法性
-        let mut rendered_set: Vec<(HeaderName, http::HeaderValue)> = Vec::with_capacity(self.set.len());
-        let mut rendered_add: Vec<(HeaderName, http::HeaderValue)> = Vec::with_capacity(self.add.len());
+        let mut rendered_set: Vec<(HeaderName, http::HeaderValue)> =
+            Vec::with_capacity(self.set.len());
+        let mut rendered_add: Vec<(HeaderName, http::HeaderValue)> =
+            Vec::with_capacity(self.add.len());
 
         for action in &self.set {
             let value = render(&action.value, env);
@@ -189,18 +182,12 @@ fn compile_actions(
         let name = HeaderName::from_bytes(entry.name.as_bytes())
             .map_err(|e| format!("{op}[{idx}] name '{}': {e}", entry.name))?;
         if entry.value.is_empty() {
-            return Err(format!(
-                "{op}[{idx}] value must not be empty for '{}'",
-                entry.name
-            ));
+            return Err(format!("{op}[{idx}] value must not be empty for '{}'", entry.name));
         }
         // 启动期只做"值中是否有 CR/LF/NUL"的预检
         // （占位符替换后可能引入缺失值，但 sanitize 在执行期会兜底）
         if entry.value.contains('\r') || entry.value.contains('\n') || entry.value.contains('\0') {
-            return Err(format!(
-                "{op}[{idx}] '{}' value contains illegal CR/LF/NUL",
-                entry.name
-            ));
+            return Err(format!("{op}[{idx}] '{}' value contains illegal CR/LF/NUL", entry.name));
         }
 
         result.push(HeaderAction {
@@ -252,11 +239,8 @@ mod tests {
     /// remove / set / add 都正确应用
     #[test]
     fn all_actions_applied() {
-        let config = make_config(
-            &["X-Internal"],
-            &[("X-Gateway", "gateway-proxy")],
-            &[("Via", "gateway")],
-        );
+        let config =
+            make_config(&["X-Internal"], &[("X-Gateway", "gateway-proxy")], &[("Via", "gateway")]);
         let policy = CompiledTransformPolicy::compile(&config).expect("compile");
 
         let mut env = make_env();

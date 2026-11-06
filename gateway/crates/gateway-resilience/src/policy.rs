@@ -13,9 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gateway_core::{
-    CircuitBreakerPolicyConfig, RetryPolicyConfig, TimeoutPolicyConfig,
-};
+use gateway_core::{CircuitBreakerPolicyConfig, RetryPolicyConfig, TimeoutPolicyConfig};
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerRegistry};
 
@@ -110,11 +108,8 @@ impl CompiledRetryPolicy {
         }
 
         // Method 集合统一小写规范化，查询时直接 lower_eq
-        let retry_methods: Vec<String> = config
-            .retry_methods
-            .iter()
-            .map(|m| m.to_ascii_uppercase())
-            .collect();
+        let retry_methods: Vec<String> =
+            config.retry_methods.iter().map(|m| m.to_ascii_uppercase()).collect();
 
         // 退避参数
         let backoff = CompiledBackoff {
@@ -170,7 +165,7 @@ impl CompiledRetryPolicy {
                 let ms = base_ms.saturating_mul(exp);
                 let capped = ms.min(self.backoff.max_delay.as_millis() as u64);
                 Duration::from_millis(capped)
-            }
+            },
         }
     }
 }
@@ -324,11 +319,8 @@ mod tests {
     /// 三类策略一起编译成功
     #[test]
     fn compile_all_types() {
-        let result = CompiledResiliencePolicies::compile(
-            &[timeout("t1")],
-            &[retry("r1")],
-            &[cb("cb1")],
-        );
+        let result =
+            CompiledResiliencePolicies::compile(&[timeout("t1")], &[retry("r1")], &[cb("cb1")]);
         let policies = result.expect("should compile");
         assert!(policies.get_timeout("t1").is_some());
         assert!(policies.get_retry("r1").is_some());
@@ -338,26 +330,14 @@ mod tests {
     /// 重复 ID 拒绝（跨类型独立，同类互斥）
     #[test]
     fn duplicate_ids_in_same_kind_rejected() {
-        assert!(CompiledResiliencePolicies::compile(
-            &[timeout("dup"), timeout("dup")],
-            &[],
-            &[]
-        )
-        .is_err());
+        assert!(CompiledResiliencePolicies::compile(&[timeout("dup"), timeout("dup")], &[], &[])
+            .is_err());
 
-        assert!(CompiledResiliencePolicies::compile(
-            &[],
-            &[retry("dup"), retry("dup")],
-            &[]
-        )
-        .is_err());
+        assert!(
+            CompiledResiliencePolicies::compile(&[], &[retry("dup"), retry("dup")], &[]).is_err()
+        );
 
-        assert!(CompiledResiliencePolicies::compile(
-            &[],
-            &[],
-            &[cb("dup"), cb("dup")]
-        )
-        .is_err());
+        assert!(CompiledResiliencePolicies::compile(&[], &[], &[cb("dup"), cb("dup")]).is_err());
     }
 
     /// Retry 的 status/method 判断正确

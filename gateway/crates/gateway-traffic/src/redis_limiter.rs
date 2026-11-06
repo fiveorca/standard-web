@@ -99,7 +99,39 @@ impl RedisLimiter {
             Some(window_end.saturating_sub(now).max(1))
         };
 
-        Ok(RateLimitOutcome { allowed, retry_after_secs })
+        Ok(RateLimitOutcome {
+            allowed,
+            retry_after_secs,
+        })
+    }
+
+    /// 递增一个任意命名空间的固定窗口计数器，返回 `(当前计数, 窗口编号)`。
+    ///
+    /// 与 [`try_acquire`](Self::try_acquire) 使用同样的 `INCR + EXPIRE`
+    /// 原子脚本，但把 `rate` 从 key 前缀里去掉，改用 `namespace`，
+    /// 这样配额插件可以复用同一连接与窗口语义，同时拿到精确计数
+    /// （用于返回剩余配额 Header）。
+    pub async fn incr_window(&self, namespace: &str, key: &str) -> Result<(u64, u64), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let window_index = now / self.window_secs;
+        let redis_key = format!("gw:{namespace}:{key}:{window_index}");
+
+        let script = "local c = redis.call('INCR', KEYS[1])\n\
+                      if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end\n\
+                      return c";
+        let window_str = self.window_secs.to_string();
+
+        let count = tokio::time::timeout(
+            COMMAND_TIMEOUT,
+            self.execute(&["EVAL", script, "1", &redis_key, &window_str]),
+        )
+        .await
+        .map_err(|_| "redis command timed out".to_string())??;
+
+        Ok((count.max(0) as u64, window_index))
     }
 
     /// 执行一条命令，返回整数应答。
@@ -123,9 +155,7 @@ impl RedisLimiter {
             write_command(conn, args)
                 .await
                 .map_err(|e| format!("redis write failed: {e}"))?;
-            read_integer(conn)
-                .await
-                .map_err(|e| format!("redis read failed: {e}"))
+            read_integer(conn).await.map_err(|e| format!("redis read failed: {e}"))
         }
         .await;
 
@@ -160,9 +190,7 @@ async fn connect(url: &str) -> Result<BufStream<TcpStream>, String> {
         write_command(&mut conn, &["SELECT", &db_str])
             .await
             .map_err(|e| format!("redis select failed: {e}"))?;
-        read_integer(&mut conn)
-            .await
-            .map_err(|e| format!("redis select failed: {e}"))?;
+        read_integer(&mut conn).await.map_err(|e| format!("redis select failed: {e}"))?;
     }
 
     Ok(conn)
@@ -183,11 +211,7 @@ fn parse_redis_url(url: &str) -> Result<(String, u16, u32), String> {
         None => (rest, ""),
     };
     let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) => (
-            h,
-            p.parse::<u16>()
-                .map_err(|e| format!("invalid redis port: {e}"))?,
-        ),
+        Some((h, p)) => (h, p.parse::<u16>().map_err(|e| format!("invalid redis port: {e}"))?),
         None => (host_port, 6379),
     };
     if host.is_empty() {
@@ -196,9 +220,7 @@ fn parse_redis_url(url: &str) -> Result<(String, u16, u32), String> {
     let db = if db_part.is_empty() {
         0
     } else {
-        db_part
-            .parse::<u32>()
-            .map_err(|e| format!("invalid redis db index: {e}"))?
+        db_part.parse::<u32>().map_err(|e| format!("invalid redis db index: {e}"))?
     };
     Ok((host.to_string(), port, db))
 }

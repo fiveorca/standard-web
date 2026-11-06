@@ -1,9 +1,10 @@
 //! HttpServer —— Hyper HTTP 服务封装（简化版）。
 //!
-//! 同时支持 HTTP/1.1 与 HTTP/2（h2c，prior knowledge）：
+//! 同时支持 HTTP/1.1 与 HTTP/2：
 //! `hyper_util::server::conn::auto` 会在连接建立时自动识别协议，
 //! 因此同一端口可以同时服务 REST（HTTP/1.1）与 gRPC（HTTP/2）。
-//! TLS（ALPN）在 Phase 6 后续的 TLS 监听器中完成。
+//! 通过 [`HttpServer::with_tls`] 挂载 [`gateway_network::tls::TlsRuntime`]
+//! 后即成为 HTTPS 监听器（TLS 1.2/1.3，ALPN 协商 h2/http1.1）。
 //!
 //! # 并发限制（Bulkhead）
 //!
@@ -45,16 +46,33 @@ use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
 use gateway_common::GatewayError;
 use http::Request;
 use hyper::body::{Body, Incoming};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+
+use crate::tls::TlsRuntime;
+
+/// TLS 握手超时：防止慢速/恶意客户端长期占用连接。
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 类型擦除后的连接流（明文 TCP 或 TLS）。
+///
+/// 两个非 auto trait 不能直接组成 trait object，因此定义组合 trait。
+trait BoxedStream: AsyncRead + AsyncWrite + Send {}
+impl<T: AsyncRead + AsyncWrite + Send> BoxedStream for T {}
+
+type BoxedIo = Pin<Box<dyn BoxedStream>>;
 
 // ---------------------------------------------------------------------------
 // 构造选项
@@ -99,9 +117,11 @@ pub struct HttpServer {
     addr: SocketAddr,
     /// 构造选项（并发限制、超时等）。
     /// Bulkhead 和 body limit 已移到 Runtime 层，ServerOptions 保留用于
-    /// 未来扩展（如 TLS 配置、连接 keep-alive 参数等）。
+    /// 未来扩展（如连接 keep-alive 参数等）。
     #[allow(dead_code)]
     options: ServerOptions,
+    /// TLS 运行时。`None` 表示明文 HTTP。
+    tls: Option<Arc<TlsRuntime>>,
 }
 
 impl HttpServer {
@@ -111,7 +131,17 @@ impl HttpServer {
     /// - `addr`：要绑定的监听地址
     /// - `options`：ServerOptions 配置（默认值用 `ServerOptions::default()`）
     pub fn new(addr: SocketAddr, options: ServerOptions) -> Self {
-        Self { addr, options }
+        Self {
+            addr,
+            options,
+            tls: None,
+        }
+    }
+
+    /// 启用 HTTPS。传入已加载证书的 [`TlsRuntime`]。
+    pub fn with_tls(mut self, tls: Arc<TlsRuntime>) -> Self {
+        self.tls = Some(tls);
+        self
     }
 
     /// 启动 HTTP Server，阻塞直到 shutdown 信号。
@@ -163,11 +193,17 @@ impl HttpServer {
         let actual = listener
             .local_addr()
             .map_err(|e| GatewayError::Internal(format!("failed to get local addr: {e}")))?;
-        tracing::info!(target: "http_server", "listening on {}", actual);
+        tracing::info!(
+            target: "http_server",
+            "listening on {}{}",
+            actual,
+            if self.tls.is_some() { " (https)" } else { "" }
+        );
 
         // =================================================================
         // 2. Accept Loop
         // =================================================================
+        let tls = self.tls.clone();
         loop {
             tokio::select! {
                 // 分支 A：收到 shutdown 信号 → 退出 accept loop
@@ -194,15 +230,45 @@ impl HttpServer {
                     // TCP_NODELAY：禁用 Nagle 算法，降低小包延迟（代理场景常用）
                     let _ = stream.set_nodelay(true);
 
-                    // TokioIo::new()：把 tokio::net::TcpStream 包装成
-                    // hyper 1.x 内部使用的 IO trait（hyper_util 提供）
-                    let io = TokioIo::new(stream);
-
                     let svc = service.clone();
+                    let tls = tls.clone();
 
-                    // 每个连接一个 spawn task：hyper 的 serve_connection
-                    // 内部已经是全异步的，不需要我们再做线程池管理
+                    // 每个连接一个 spawn task。TLS 握手也在任务内完成，
+                    // 避免慢速握手阻塞 accept loop。
                     tokio::spawn(async move {
+                        let io: BoxedIo = match tls {
+                            None => Box::pin(stream),
+                            Some(tls) => {
+                                let acceptor = tls.acceptor();
+                                match tokio::time::timeout(
+                                    TLS_HANDSHAKE_TIMEOUT,
+                                    acceptor.accept(stream),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(tls_stream)) => Box::pin(tls_stream),
+                                    Ok(Err(e)) => {
+                                        tracing::debug!(
+                                            target: "http_server",
+                                            peer = peer_addr.to_string(),
+                                            error = e.to_string(),
+                                            "tls handshake failed"
+                                        );
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        tracing::debug!(
+                                            target: "http_server",
+                                            peer = peer_addr.to_string(),
+                                            "tls handshake timed out"
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                        };
+                        let io = TokioIo::new(io);
+
                         let svc = svc.clone();
 
                         // tower::service_fn：接受一个 async 闭包，生成 Tower Service。

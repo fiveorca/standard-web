@@ -35,6 +35,11 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+# 证书资源写入时做真实 PEM 解析与公私钥匹配校验
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# 生成测试用自签名证书（证书校验与脱敏流程）
+rcgen = "0.13"

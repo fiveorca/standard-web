@@ -83,6 +83,36 @@ struct VersionResponse {
     config_version: u64,
 }
 
+/// /upstreams 响应中的单个端点。
+#[derive(Serialize)]
+struct EndpointHealthView {
+    /// 运行时端点 ID
+    id: String,
+    /// `host:port`
+    address: String,
+    /// 负载均衡权重
+    weight: u32,
+    /// 健康状态：HEALTHY / UNHEALTHY / UNKNOWN / DRAINING
+    status: String,
+}
+
+/// /upstreams 响应中的单个上游。
+#[derive(Serialize)]
+struct UpstreamHealthView {
+    id: String,
+    /// 负载均衡算法
+    algorithm: String,
+    endpoints: Vec<EndpointHealthView>,
+}
+
+/// /upstreams 响应。
+#[derive(Serialize)]
+struct UpstreamsResponse {
+    /// 当前生效配置版本
+    config_version: u64,
+    upstreams: Vec<UpstreamHealthView>,
+}
+
 // ---------------------------------------------------------------------------
 // 启动 Admin Server
 // ---------------------------------------------------------------------------
@@ -120,7 +150,8 @@ pub async fn start_admin_server(
         // routing::get(handler) 注册 GET 方法
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
-        .route("/version", get(version_handler));
+        .route("/version", get(version_handler))
+        .route("/upstreams", get(upstreams_handler));
 
     // observability.metrics.enabled 为 true 时才暴露 Prometheus 端点
     if metrics_enabled {
@@ -240,4 +271,38 @@ async fn version_handler(State(rt): State<Arc<Runtime>>) -> impl IntoResponse {
         environment: rt.environment().to_string(),
         config_version: rt.config_version(),
     })
+}
+
+/// GET /upstreams —— 上游端点健康状态。
+///
+/// 返回当前快照中所有上游及其端点的健康状态，用于排障与联调
+/// （主动/被动健康检查的效果可以在这里直接观察）。
+async fn upstreams_handler(State(rt): State<Arc<Runtime>>) -> impl IntoResponse {
+    let state = rt.snapshot_store().current();
+    let upstreams = state.upstream_registry.list_upstreams().await;
+    let items = upstreams
+        .into_iter()
+        .map(|upstream| UpstreamHealthView {
+            id: upstream.id.clone(),
+            algorithm: upstream.algorithm.to_string(),
+            endpoints: upstream
+                .endpoints
+                .into_iter()
+                .map(|ep| EndpointHealthView {
+                    id: ep.runtime_id.clone(),
+                    address: ep.address(),
+                    weight: ep.weight,
+                    status: ep.status.to_string(),
+                })
+                .collect(),
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(UpstreamsResponse {
+            config_version: state.config_version,
+            upstreams: items,
+        }),
+    )
 }

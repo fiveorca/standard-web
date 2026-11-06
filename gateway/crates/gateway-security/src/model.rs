@@ -258,10 +258,7 @@ mod tests {
     fn rejection_status_and_code_pairs() {
         let unauthorized = AuthRejection::unauthenticated("no token");
         assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            unauthorized.code,
-            ErrorCode::GatewayAuthenticationFailed
-        );
+        assert_eq!(unauthorized.code, ErrorCode::GatewayAuthenticationFailed);
 
         let forbidden = AuthRejection::forbidden("ip denied");
         assert_eq!(forbidden.status, StatusCode::FORBIDDEN);

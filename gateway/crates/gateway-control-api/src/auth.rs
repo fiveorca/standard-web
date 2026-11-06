@@ -59,9 +59,7 @@ impl Principal {
         if self.role.can_write() {
             Ok(())
         } else {
-            Err(crate::error::ApiError::forbidden(
-                "admin role required for write operations",
-            ))
+            Err(crate::error::ApiError::forbidden("admin role required for write operations"))
         }
     }
 }
@@ -114,12 +112,7 @@ impl AdminAuth {
     /// 示例：`token-a:alice,token-b:bob`。空白项会被忽略。
     pub fn add_spec(&mut self, spec: &str, default_actor: &str, role: Role) {
         // enumerate 直接提供序号，避免手工维护循环计数器
-        for (index, part) in spec
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .enumerate()
-        {
+        for (index, part) in spec.split(',').map(str::trim).filter(|s| !s.is_empty()).enumerate() {
             let (token, actor) = match part.split_once(':') {
                 Some((token, actor)) => (token.trim(), actor.trim()),
                 None => (part, default_actor),
@@ -185,9 +178,7 @@ impl FromRequestParts<AdminState> for Principal {
             .split_once(' ')
             .ok_or_else(|| ApiError::unauthorized("malformed Authorization header"))?;
         if !scheme.eq_ignore_ascii_case("bearer") {
-            return Err(ApiError::unauthorized(
-                "only Bearer authentication is supported",
-            ));
+            return Err(ApiError::unauthorized("only Bearer authentication is supported"));
         }
 
         state

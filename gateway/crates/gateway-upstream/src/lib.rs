@@ -11,13 +11,16 @@
 //!
 //! - [`balancer`]：LoadBalancer Trait 的四个实现（RR / WRR / Random / WeightedRandom）
 //! - [`registry`]：UpstreamRegistry——集中管理所有 Upstream 的运行时状态
+//! - [`health`]：主动探测（TCP / HTTP）与连续阈值状态机
 
 #![allow(clippy::needless_doctest_main)]
 
 pub mod balancer;
+pub mod health;
 pub mod registry;
 
 pub use balancer::{
     RandomBalancer, RoundRobinBalancer, WeightedRandomBalancer, WeightedRoundRobinBalancer,
 };
+pub use health::{probe, HealthTracker};
 pub use registry::UpstreamRegistry;

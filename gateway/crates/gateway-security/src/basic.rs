@@ -18,9 +18,7 @@ use gateway_core::BasicCredentialConfig;
 use http::HeaderValue;
 use subtle::Choice;
 
-use crate::model::{
-    constant_time_eq_str, AuthIdentity, AuthMechanism, AuthRejection,
-};
+use crate::model::{constant_time_eq_str, AuthIdentity, AuthMechanism, AuthRejection};
 
 /// `WWW-Authenticate` 挑战值。
 ///
@@ -84,14 +82,14 @@ impl BasicPolicy {
         })?;
 
         // 2) 非 ASCII / 非法字节：直接拒绝（不做猜测式解码）
-        let text = value.to_str().map_err(|_| {
-            invalid_credentials("Basic credentials are not valid UTF-8")
-        })?;
+        let text = value
+            .to_str()
+            .map_err(|_| invalid_credentials("Basic credentials are not valid UTF-8"))?;
 
         // 3) 拆分 scheme 与 base64 段；只允许恰好一个分隔空格
-        let (scheme, encoded) = text.split_once(' ').ok_or_else(|| {
-            invalid_credentials("Basic credentials must be 'Basic <base64>'")
-        })?;
+        let (scheme, encoded) = text
+            .split_once(' ')
+            .ok_or_else(|| invalid_credentials("Basic credentials must be 'Basic <base64>'"))?;
         // auth-scheme 大小写不敏感（RFC 7235 §2.1）
         if !scheme.eq_ignore_ascii_case("basic") {
             return Err(invalid_credentials("unsupported authentication scheme"));
@@ -106,9 +104,9 @@ impl BasicPolicy {
         let decoded_text = std::str::from_utf8(&decoded)
             .map_err(|_| invalid_credentials("Basic credentials are not valid UTF-8"))?;
         // 只按**第一个**冒号切分：RFC 2617 允许密码包含冒号
-        let (username, password) = decoded_text.split_once(':').ok_or_else(|| {
-            invalid_credentials("Basic credentials must be 'username:password'")
-        })?;
+        let (username, password) = decoded_text
+            .split_once(':')
+            .ok_or_else(|| invalid_credentials("Basic credentials must be 'username:password'"))?;
 
         // 6) 常量时间遍历全部凭据：
         //    即使已命中也不提前退出，避免"凭据在列表中的位置"泄露到响应时间

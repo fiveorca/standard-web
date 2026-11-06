@@ -44,6 +44,13 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub routes: Vec<gateway_core::RouteConfig>,
 
+    /// TLS 证书资源（YAML / 引导配置模式）。
+    ///
+    /// 与 `server.http.tls.certificate_id` 配合使用；控制面模式下
+    /// 证书资源随配置快照下发，本地列表只作为启动引导与文件回退。
+    #[serde(default)]
+    pub certificates: Vec<gateway_core::CertificateConfig>,
+
     /// Phase 2 策略配置段（P2.1 新增）。
     ///
     /// 所有治理策略（鉴权/限流/超时/重试/熔断/CORS/Header 转换）集中
@@ -119,6 +126,60 @@ pub struct HttpListenerConfig {
     pub address: String,
     #[serde(default = "default_http_port")]
     pub port: u16,
+    /// TLS（HTTPS）配置。未启用时监听明文 HTTP。
+    #[serde(default)]
+    pub tls: TlsListenerConfig,
+}
+
+/// 业务 Listener 的 TLS 配置。
+///
+/// 证书来源按优先级：
+/// 1. `certificate_id`：引用 `certificates` 资源（YAML 或控制面快照）
+/// 2. `cert_file` + `key_file`：直接从文件加载（支持热重载）
+///
+/// 两者可同时配置：文件证书作为启动引导/回退，配置快照中的证书
+/// 会在发布后加入 SNI 集合，并可按 `certificate_id` 切换默认证书。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsListenerConfig {
+    /// 是否启用 HTTPS
+    #[serde(default)]
+    pub enabled: bool,
+    /// 默认证书资源 ID（SNI 未命中时使用）
+    #[serde(default)]
+    pub certificate_id: Option<String>,
+    /// 证书链 PEM 文件路径（YAML 独立部署模式）
+    #[serde(default)]
+    pub cert_file: Option<String>,
+    /// 私钥 PEM 文件路径（PKCS#8 / RSA / ECDSA）
+    #[serde(default)]
+    pub key_file: Option<String>,
+    /// 文件证书绑定的域名列表（SNI 匹配，支持 `*.example.com`）
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// 可选客户端 CA 文件；配置后要求 mTLS 客户端证书
+    #[serde(default)]
+    pub client_ca_file: Option<String>,
+    /// 文件证书热重载轮询间隔（秒）
+    #[serde(default = "default_tls_reload_interval_secs")]
+    pub reload_interval_secs: u64,
+}
+
+fn default_tls_reload_interval_secs() -> u64 {
+    10
+}
+
+impl Default for TlsListenerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            certificate_id: None,
+            cert_file: None,
+            key_file: None,
+            domains: Vec::new(),
+            client_ca_file: None,
+            reload_interval_secs: default_tls_reload_interval_secs(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -137,6 +198,7 @@ impl Default for HttpListenerConfig {
             enabled: default_true(),
             address: default_http_address(),
             port: default_http_port(),
+            tls: TlsListenerConfig::default(),
         }
     }
 }

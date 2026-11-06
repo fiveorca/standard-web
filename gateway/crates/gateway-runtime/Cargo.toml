@@ -62,3 +62,5 @@ base64 = { workspace = true }
 wiremock = { workspace = true }
 assert-json-diff = { workspace = true }
 tempfile = { workspace = true }
+# TLS 引导测试：生成自签名证书
+rcgen = "0.13"

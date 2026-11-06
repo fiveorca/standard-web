@@ -117,6 +117,9 @@ pub enum AuthPolicySpec {
         credentials: Vec<BasicCredentialConfig>,
     },
     /// API Key 认证。
+    ///
+    /// 支持完整生命周期：生成时仅返回一次明文，配置快照中只保存摘要；
+    /// 校验时可识别过期、吊销、作用域不足，并累计使用次数。
     ApiKey {
         /// 允许的 Key 列表
         #[serde(default)]
@@ -127,17 +130,23 @@ pub enum AuthPolicySpec {
         /// 是否允许从 Query 参数读取（默认不允许，避免 Key 泄漏到访问日志）
         #[serde(default)]
         query_param: Option<String>,
+        /// 要求 Key 必须同时具备的作用域列表（空表示不校验）。
+        ///
+        /// 任一所要求的作用域缺失即 403，避免"有 Key 即可访问全部 API"。
+        #[serde(default)]
+        required_scopes: Vec<String>,
     },
     /// JWT 认证。
     ///
-    /// 本实现采用 **静态密钥 + 算法白名单** 方案：
-    ///   - 只支持 HMAC 系列（HS256/HS384/HS512），密钥为静态共享密钥
-    ///   - 算法必须在 `algorithms` 白名单内，杜绝 `alg: none` 伪造
-    ///   - 非对称算法（RS/ES）留待后续使用 JWKS 时再引入
+    /// 支持两种密钥来源，可单独或组合使用：
+    ///   - `secret` + `HS*`：静态共享密钥（适合内部服务）
+    ///   - `jwks` + `RS*`/`ES*`：JWKS 公钥集合，按 `kid` 选择（适合外部 IdP）
+    ///
+    /// 算法必须在 `algorithms` 白名单内，杜绝 `alg: none` 与算法混淆攻击。
     Jwt {
-        /// HMAC 静态密钥（明文或 base64 均可，具体编码由 security 模块约定）。
+        /// 静态密钥（HMAC 使用）。
         ///
-        /// 校验器在 `enabled = true` 时必须提供该字段（见 validator）。
+        /// 算法白名单包含 `HS*` 时必填且至少 32 字节；仅配置非对称算法时省略。
         #[serde(default)]
         secret: Option<String>,
         /// 允许的签名算法白名单。**不能为空**。
@@ -172,18 +181,33 @@ pub enum AuthPolicySpec {
         /// 是否校验 `exp`。默认 true。
         #[serde(default = "default_true")]
         validate_exp: bool,
+        /// 内联 JWKS 文档（JSON 字符串）。
+        ///
+        /// 配置后启用基于 `kid` 的非对称密钥验签（RS/ES 系列）：
+        ///   - 文档结构遵循 RFC 7517（`{"keys": [...]}`）
+        ///   - 同一文档可包含多把密钥，按 Token Header 的 `kid` 选择
+        ///   - 发布新快照即可完成密钥轮换，旧 Token 在 `exp` 到期前仍可用
+        ///
+        /// 数据面不主动发起 HTTP 请求：远程 `jwks_uri` 由控制面/运维侧
+        /// 拉取后以内联文档形式写入配置快照，避免数据面引入额外出网依赖。
+        #[serde(default)]
+        jwks: Option<String>,
     },
 }
 
-/// JWT 允许的签名算法（静态密钥方案下的白名单成员）。
+/// JWT 允许的签名算法（白名单成员）。
 ///
-/// # 为什么只列 HMAC 三种
-/// 静态密钥方案下只有对称算法可用。把 `none` 与其他非对称算法
-/// 排除在枚举之外，意味着它们在反序列化阶段就会被拒绝——
-/// 这是"算法白名单"的第一道防线。
+/// # 为什么用枚举而不是字符串
+/// 把 `none` 排除在枚举之外，意味着它在反序列化阶段就会被拒绝——
+/// 这是"算法白名单"的第一道防线。Token Header 中的 `alg` 还必须在
+/// 策略配置的白名单内，两道检查共同防住 `alg` 混淆攻击。
+///
+/// # 密钥来源约束
+///   - `HS*`：使用策略上的静态 `secret`
+///   - `RS*` / `ES*`：使用 `jwks` 中的公钥，按 `kid` 选择
 ///
 /// # serde 命名
-/// `rename_all = "UPPERCASE"` 让 YAML 中可以直接写 `HS256`，
+/// `rename_all = "UPPERCASE"` 让 YAML 中可以直接写 `HS256` / `RS256`，
 /// 与 JWT 生态（jose/jwt.io）的通用写法一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -194,6 +218,39 @@ pub enum JwtAlgorithm {
     Hs384,
     /// HMAC-SHA512
     Hs512,
+    /// RSASSA-PKCS1-v1_5 + SHA-256
+    Rs256,
+    /// RSASSA-PKCS1-v1_5 + SHA-384
+    Rs384,
+    /// RSASSA-PKCS1-v1_5 + SHA-512
+    Rs512,
+    /// ECDSA P-256 + SHA-256
+    Es256,
+    /// ECDSA P-384 + SHA-384
+    Es384,
+}
+
+impl JwtAlgorithm {
+    /// 是否属于对称（HMAC）算法。
+    ///
+    /// 对称算法使用静态 `secret`；非对称算法必须配置 `jwks`。
+    pub fn is_hmac(self) -> bool {
+        matches!(self, Self::Hs256 | Self::Hs384 | Self::Hs512)
+    }
+
+    /// 稳定的字符串表示（与 YAML/Token Header 一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hs256 => "HS256",
+            Self::Hs384 => "HS384",
+            Self::Hs512 => "HS512",
+            Self::Rs256 => "RS256",
+            Self::Rs384 => "RS384",
+            Self::Rs512 => "RS512",
+            Self::Es256 => "ES256",
+            Self::Es384 => "ES384",
+        }
+    }
 }
 
 /// HTTP Basic 凭据。
@@ -206,16 +263,49 @@ pub struct BasicCredentialConfig {
 }
 
 /// API Key 条目。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # 明文 vs 摘要
+/// 生产环境推荐只配置 `key_hash`（SHA-256 十六进制），避免配置快照与
+/// 数据库中出现明文密钥。`key` 仅用于本地开发或由控制面在生成时
+/// 一次性写入（写入后应立即替换为摘要）。
+///
+/// 两者必须提供且仅提供其一；同时提供时以 `key` 为准。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiKeyConfig {
-    /// Key 值（**敏感**；日志与审计中严禁输出）
+    /// Key 明文（**敏感**；日志、审计与快照持久化中严禁保存）
+    #[serde(default)]
     pub key: String,
+    /// Key 的 SHA-256 摘要（64 位小写十六进制）
+    ///
+    /// 使用与明文等价的摘要做常量时间比对，数据库/快照只保存该字段。
+    #[serde(default)]
+    pub key_hash: Option<String>,
+    /// 稳定标识（吊销、轮换、用量统计的索引）
+    ///
+    /// 未配置时由 security 模块在编译期生成（`k-<sha256 前 16 位>`），
+    /// 不会暴露给客户端。
+    #[serde(default)]
+    pub id: Option<String>,
     /// 标签（例如所属调用方名称），用于日志脱敏后的可读标识
     #[serde(default)]
     pub label: Option<String>,
     /// 该 Key 所属租户（Phase 7 多租户）
     #[serde(default)]
     pub tenant_id: Option<String>,
+    /// 绑定的 Consumer（调用方）ID
+    ///
+    /// 认证通过后写入 `AuthIdentity::subject`，供配额 / 审计 / 分析消费。
+    #[serde(default)]
+    pub consumer_id: Option<String>,
+    /// 授予的权限作用域（例如 `orders:read`）
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// 过期时间（Unix 秒）。`None` 表示永不过期。
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    /// 是否已吊销。吊销后立即失效，但记录保留用于审计与用量查询。
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 /// serde 默认值：API Key 读取 Header 名。

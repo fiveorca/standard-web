@@ -31,8 +31,7 @@ use gateway_core::RequestContext;
 ///
 /// 覆盖从 1ms 到 30s，足以区分本地缓存命中、正常上游响应与慢请求。
 /// `+Inf` 桶不单独存储，渲染时用总次数补上。
-const DURATION_BUCKETS_MS: [u64; 12] =
-    [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 30000];
+const DURATION_BUCKETS_MS: [u64; 12] = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 30000];
 
 /// 全局单例。`OnceLock` 保证多线程下只初始化一次。
 static GLOBAL_METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -65,6 +64,8 @@ impl HistogramState {
 pub struct Metrics {
     /// counter：metric 名称 → 标签串 → 计数
     counters: RwLock<BTreeMap<String, BTreeMap<String, Arc<AtomicU64>>>>,
+    /// gauge：metric 名称 → 标签串 → 当前值
+    gauges: RwLock<BTreeMap<String, BTreeMap<String, Arc<AtomicU64>>>>,
     /// histogram：metric 名称 → 标签串 → 累计状态
     histograms: RwLock<BTreeMap<String, BTreeMap<String, Arc<HistogramState>>>>,
 }
@@ -80,6 +81,7 @@ impl Metrics {
     pub fn new() -> Self {
         Self {
             counters: RwLock::new(BTreeMap::new()),
+            gauges: RwLock::new(BTreeMap::new()),
             histograms: RwLock::new(BTreeMap::new()),
         }
     }
@@ -119,6 +121,30 @@ impl Metrics {
             .entry(key)
             .or_insert_with(|| Arc::new(AtomicU64::new(0)));
         counter.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    /// 设置 gauge 当前值（覆盖语义，不是累加）。
+    ///
+    /// 用于表达瞬时状态，例如端点健康（0/1）、当前连接数等。
+    pub fn set_gauge(&self, name: &str, labels: &[(&str, &str)], value: u64) {
+        let key = render_labels(labels);
+        {
+            let guard = self.gauges.read().unwrap_or_else(|p| p.into_inner());
+            if let Some(map) = guard.get(name) {
+                if let Some(gauge) = map.get(&key) {
+                    gauge.store(value, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+
+        let mut guard = self.gauges.write().unwrap_or_else(|p| p.into_inner());
+        guard
+            .entry(name.to_string())
+            .or_default()
+            .entry(key)
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .store(value, Ordering::Relaxed);
     }
 
     /// 记录一次直方图观测（单位：毫秒）。
@@ -216,6 +242,15 @@ impl Metrics {
             }
         }
 
+        // ---- gauge ----
+        let gauges = self.gauges.read().unwrap_or_else(|p| p.into_inner());
+        for (name, series) in gauges.iter() {
+            let _ = writeln!(out, "# TYPE {name} gauge");
+            for (labels, value) in series.iter() {
+                let _ = writeln!(out, "{name}{labels} {}", value.load(Ordering::Relaxed));
+            }
+        }
+
         // ---- histogram ----
         let histograms = self.histograms.read().unwrap_or_else(|p| p.into_inner());
         for (name, series) in histograms.iter() {
@@ -237,7 +272,8 @@ impl Metrics {
                 let _ = writeln!(out, "{name}_bucket{inf_labels} {count}");
 
                 let sum_labels = labels.clone();
-                let _ = writeln!(out, "{name}_sum{sum_labels} {}", state.sum.load(Ordering::Relaxed));
+                let _ =
+                    writeln!(out, "{name}_sum{sum_labels} {}", state.sum.load(Ordering::Relaxed));
                 let _ = writeln!(out, "{name}_count{sum_labels} {count}");
             }
         }
@@ -321,9 +357,13 @@ mod tests {
         metrics.observe_ms("gateway_request_duration_milliseconds", &[("route", "r1")], 60);
 
         let text = metrics.render();
-        assert!(text.contains("gateway_request_duration_milliseconds_bucket{route=\"r1\",le=\"5\"} 1"));
-        assert!(text.contains("gateway_request_duration_milliseconds_bucket{route=\"r1\",le=\"100\"} 2"));
-        assert!(text.contains("gateway_request_duration_milliseconds_bucket{route=\"r1\",le=\"+Inf\"} 2"));
+        assert!(
+            text.contains("gateway_request_duration_milliseconds_bucket{route=\"r1\",le=\"5\"} 1")
+        );
+        assert!(text
+            .contains("gateway_request_duration_milliseconds_bucket{route=\"r1\",le=\"100\"} 2"));
+        assert!(text
+            .contains("gateway_request_duration_milliseconds_bucket{route=\"r1\",le=\"+Inf\"} 2"));
         assert!(text.contains("gateway_request_duration_milliseconds_sum{route=\"r1\"} 63"));
         assert!(text.contains("gateway_request_duration_milliseconds_count{route=\"r1\"} 2"));
     }
@@ -340,5 +380,26 @@ mod tests {
         let metrics = Metrics::new();
         metrics.inc_counter("gateway_startup_total", &[]);
         assert!(metrics.render().contains("gateway_startup_total 1"));
+    }
+
+    /// gauge 是覆盖语义，渲染带 TYPE 声明
+    #[test]
+    fn gauge_overwrites_and_renders() {
+        let metrics = Metrics::new();
+        metrics.set_gauge(
+            "gateway_endpoint_healthy",
+            &[("upstream", "u1"), ("endpoint", "u1-ep-0")],
+            0,
+        );
+        metrics.set_gauge(
+            "gateway_endpoint_healthy",
+            &[("upstream", "u1"), ("endpoint", "u1-ep-0")],
+            1,
+        );
+
+        let text = metrics.render();
+        assert!(text.contains("# TYPE gateway_endpoint_healthy gauge"));
+        assert!(text.contains("gateway_endpoint_healthy{upstream=\"u1\",endpoint=\"u1-ep-0\"} 1"));
+        assert!(!text.contains("} 0\n"));
     }
 }

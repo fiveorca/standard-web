@@ -121,9 +121,7 @@ impl CompiledCorsPolicy {
         }
         request_headers.iter().all(|rh| {
             let rh = rh.to_ascii_lowercase();
-            self.allow_headers
-                .iter()
-                .any(|ah| ah.to_ascii_lowercase() == rh)
+            self.allow_headers.iter().any(|ah| ah.to_ascii_lowercase() == rh)
         })
     }
 
@@ -138,30 +136,18 @@ impl CompiledCorsPolicy {
         } else {
             origin.to_string()
         };
-        out.push((
-            ACCESS_CONTROL_ALLOW_ORIGIN.as_str().to_string(),
-            acao.into_bytes(),
-        ));
+        out.push((ACCESS_CONTROL_ALLOW_ORIGIN.as_str().to_string(), acao.into_bytes()));
         if self.allow_credentials {
-            out.push((
-                ACCESS_CONTROL_ALLOW_CREDENTIALS.as_str().to_string(),
-                b"true".to_vec(),
-            ));
+            out.push((ACCESS_CONTROL_ALLOW_CREDENTIALS.as_str().to_string(), b"true".to_vec()));
         }
         let joined = self.allow_methods.join(", ");
-        out.push((
-            ACCESS_CONTROL_ALLOW_METHODS.as_str().to_string(),
-            joined.into_bytes(),
-        ));
+        out.push((ACCESS_CONTROL_ALLOW_METHODS.as_str().to_string(), joined.into_bytes()));
         let ah = if self.allow_any_headers {
             "*".to_string()
         } else {
             self.allow_headers.join(", ")
         };
-        out.push((
-            ACCESS_CONTROL_ALLOW_HEADERS.as_str().to_string(),
-            ah.into_bytes(),
-        ));
+        out.push((ACCESS_CONTROL_ALLOW_HEADERS.as_str().to_string(), ah.into_bytes()));
         out.push((
             ACCESS_CONTROL_MAX_AGE.as_str().to_string(),
             self.max_age_secs.to_string().into_bytes(),
@@ -181,15 +167,9 @@ impl CompiledCorsPolicy {
         } else {
             origin.to_string()
         };
-        out.push((
-            ACCESS_CONTROL_ALLOW_ORIGIN.as_str().to_string(),
-            acao.into_bytes(),
-        ));
+        out.push((ACCESS_CONTROL_ALLOW_ORIGIN.as_str().to_string(), acao.into_bytes()));
         if self.allow_credentials {
-            out.push((
-                ACCESS_CONTROL_ALLOW_CREDENTIALS.as_str().to_string(),
-                b"true".to_vec(),
-            ));
+            out.push((ACCESS_CONTROL_ALLOW_CREDENTIALS.as_str().to_string(), b"true".to_vec()));
         }
         if !self.expose_headers.is_empty() {
             out.push((
@@ -262,11 +242,7 @@ impl Plugin for CorsRequestPlugin {
     async fn execute(&self, ctx: &mut PluginContext<'_>) -> Result<PluginDecision, PluginError> {
         let route = match ctx.route.as_ref() {
             Some(r) => r,
-            None => {
-                return Err(PluginError::Other(
-                    "cors_request: 没有 route（装配错误）".into(),
-                ))
-            },
+            None => return Err(PluginError::Other("cors_request: 没有 route（装配错误）".into())),
         };
         let policy_id = match &route.cors_policy_id {
             Some(id) => id,
@@ -370,11 +346,7 @@ impl Plugin for CorsResponsePlugin {
     async fn execute(&self, ctx: &mut PluginContext<'_>) -> Result<PluginDecision, PluginError> {
         let route = match ctx.route.as_ref() {
             Some(r) => r,
-            None => {
-                return Err(PluginError::Other(
-                    "cors_response: 没有 route（装配错误）".into(),
-                ))
-            },
+            None => return Err(PluginError::Other("cors_response: 没有 route（装配错误）".into())),
         };
         let policy_id = match &route.cors_policy_id {
             Some(id) => id,

@@ -22,9 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gateway_core::TransformPolicyConfig;
-use gateway_plugin::{
-    Plugin, PluginContext, PluginDecision, PluginError, PluginPhase,
-};
+use gateway_plugin::{Plugin, PluginContext, PluginDecision, PluginError, PluginPhase};
 
 use crate::compile::CompiledTransformPolicies;
 use crate::placeholder::PlaceholderEnv;
@@ -58,7 +56,10 @@ impl TransformPlugin {
     /// - `policies`：已编译的策略集合
     /// - `direction`：请求或响应方向
     pub fn new(policies: Arc<CompiledTransformPolicies>, direction: TransformDirection) -> Self {
-        Self { policies, direction }
+        Self {
+            policies,
+            direction,
+        }
     }
 
     /// 从配置直接编译并构造一对插件（请求 + 响应）。
@@ -73,11 +74,8 @@ impl TransformPlugin {
         response_configs: &[TransformPolicyConfig],
     ) -> Result<(Self, Self), PluginError> {
         // 请求和响应方向共享同一个编译函数——TransformPolicyConfig 结构相同
-        let all: Vec<TransformPolicyConfig> = request_configs
-            .iter()
-            .chain(response_configs.iter())
-            .cloned()
-            .collect();
+        let all: Vec<TransformPolicyConfig> =
+            request_configs.iter().chain(response_configs.iter()).cloned().collect();
         let policies = CompiledTransformPolicies::compile(&all).map_err(|message| {
             PluginError::ConfigInvalid {
                 plugin: PLUGIN_NAME.into(),
@@ -171,10 +169,7 @@ impl Plugin for TransformPlugin {
         Ok(())
     }
 
-    async fn execute(
-        &self,
-        ctx: &mut PluginContext<'_>,
-    ) -> Result<PluginDecision, PluginError> {
+    async fn execute(&self, ctx: &mut PluginContext<'_>) -> Result<PluginDecision, PluginError> {
         // 1) 取 Route（请求方向必须存在；响应方向也必须存在，因为短路响应也经过）
         let Some(route) = ctx.route.as_ref() else {
             return Err(PluginError::ExecutionFailed {
@@ -232,8 +227,8 @@ impl Plugin for TransformPlugin {
                     let Some(response) = ctx.response.as_mut() else {
                         return Err(PluginError::ExecutionFailed {
                             plugin: self.name().to_string(),
-                            message:
-                                "response transform invoked without a response view".to_string(),
+                            message: "response transform invoked without a response view"
+                                .to_string(),
                         });
                     };
                     let mut headers = response.headers.clone();
@@ -267,9 +262,7 @@ mod tests {
 
     /// 辅助：构造最小 RouteConfig（带 request_transform_id）
     fn route_with_transform_id(id: Option<&str>) -> gateway_core::models::RouteConfig {
-        let mut json = String::from(
-            r#"{"id":"r1","path_value":"/","service_id":"svc"}"#,
-        );
+        let mut json = String::from(r#"{"id":"r1","path_value":"/","service_id":"svc"}"#);
         if let Some(id) = id {
             // 两个方向都指向同一策略 id（测试用）
             json = format!(
@@ -312,18 +305,12 @@ mod tests {
         let route = std::sync::Arc::new(route_with_transform_id(Some("t1")));
         let mut plugin_ctx = PluginContext::new(&mut parts, &mut ctx, Some(route), None);
 
-        let decision = request_plugin
-            .execute(&mut plugin_ctx)
-            .await
-            .expect("execute");
+        let decision = request_plugin.execute(&mut plugin_ctx).await.expect("execute");
         assert!(decision.is_continue());
 
         // 验证：X-Internal 被删除，X-Gateway 被设置
         assert!(plugin_ctx.parts.headers.get("X-Internal").is_none());
-        assert_eq!(
-            plugin_ctx.parts.headers.get("X-Gateway").unwrap().as_bytes(),
-            b"gw"
-        );
+        assert_eq!(plugin_ctx.parts.headers.get("X-Gateway").unwrap().as_bytes(), b"gw");
     }
 
     /// 响应方向插件能改写 response.headers
@@ -334,10 +321,8 @@ mod tests {
         let route = std::sync::Arc::new(route_with_transform_id(Some("t1")));
 
         // ResponsePreClient 阶段会有 response 视图传入
-        let mut resp_parts = gateway_plugin::ResponseParts::new(
-            http::StatusCode::OK,
-            HeaderMap::new(),
-        );
+        let mut resp_parts =
+            gateway_plugin::ResponseParts::new(http::StatusCode::OK, HeaderMap::new());
         resp_parts.headers.insert(
             http::HeaderName::from_static("x-internal"),
             http::HeaderValue::from_static("secret"),
@@ -346,17 +331,11 @@ mod tests {
         let mut plugin_ctx =
             PluginContext::new(&mut parts, &mut ctx, Some(route), Some(&mut resp_parts));
 
-        let decision = response_plugin
-            .execute(&mut plugin_ctx)
-            .await
-            .expect("execute");
+        let decision = response_plugin.execute(&mut plugin_ctx).await.expect("execute");
         assert!(decision.is_continue());
 
         assert!(resp_parts.headers.get("X-Internal").is_none());
-        assert_eq!(
-            resp_parts.headers.get("X-Gateway").unwrap().as_bytes(),
-            b"gw"
-        );
+        assert_eq!(resp_parts.headers.get("X-Gateway").unwrap().as_bytes(), b"gw");
     }
 
     /// 引用不存在策略 → fail closed（Err）
@@ -378,10 +357,7 @@ mod tests {
         let route = std::sync::Arc::new(route_with_transform_id(None));
         let mut plugin_ctx = PluginContext::new(&mut parts, &mut ctx, Some(route), None);
 
-        let decision = request_plugin
-            .execute(&mut plugin_ctx)
-            .await
-            .expect("execute");
+        let decision = request_plugin.execute(&mut plugin_ctx).await.expect("execute");
         assert!(decision.is_continue());
     }
 

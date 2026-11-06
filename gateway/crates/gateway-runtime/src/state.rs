@@ -25,8 +25,8 @@ use gateway_config::{CompiledSnapshot, ConfigError, GatewayConfig};
 use gateway_plugin::PluginRegistry;
 use gateway_resilience::{CircuitBreakerPlugin, CompiledRetryPolicy};
 use gateway_routing::RouteTable;
-use gateway_security::{build_cors_plugins, AuthPlugin};
-use gateway_traffic::RateLimitPlugin;
+use gateway_security::{build_cors_plugins, AuthPlugin, WafPlugin};
+use gateway_traffic::{QuotaPlugin, RateLimitPlugin};
 use gateway_transform::TransformPlugin;
 use gateway_upstream::UpstreamRegistry;
 use thiserror::Error;
@@ -53,6 +53,10 @@ pub enum SnapshotApplyError {
     /// 插件编译失败（策略配置与编译期校验不一致）
     #[error("failed to compile plugins: {0}")]
     PluginCompile(String),
+
+    /// TLS 证书解析失败（证书/私钥不匹配或 PEM 非法）
+    #[error("failed to apply TLS certificates: {0}")]
+    Tls(String),
 
     /// 应用锁被污染（说明上一次 apply 发生 panic）
     #[error("snapshot apply lock poisoned")]
@@ -95,6 +99,8 @@ pub struct RuntimeState {
     /// 服务发现后台任务每次 tick 从这里读取最新配置，
     /// 保证热更新后 discovery 配置也随快照变化。
     pub upstream_configs: Vec<gateway_core::UpstreamConfig>,
+    /// TLS 证书资源快照（供运行时热更新 SNI 证书集合）。
+    pub certificates: Vec<gateway_core::CertificateConfig>,
 }
 
 impl RuntimeState {
@@ -142,12 +148,7 @@ impl RuntimeState {
             .timeout
             .iter()
             .filter(|p| p.enabled && !p.id.is_empty())
-            .map(|p| {
-                (
-                    p.id.clone(),
-                    std::time::Duration::from_millis(p.request_timeout_ms),
-                )
-            })
+            .map(|p| (p.id.clone(), std::time::Duration::from_millis(p.request_timeout_ms)))
             .collect::<HashMap<_, _>>();
 
         // RetryPolicy 编译：id → CompiledRetryPolicy
@@ -195,6 +196,7 @@ impl RuntimeState {
             timeouts,
             retries,
             upstream_configs: upstreams,
+            certificates: snapshot.bundle.certificates.clone(),
         })
     }
 
@@ -227,42 +229,53 @@ fn build_plugin_registry(
     let mut registry = PluginRegistry::new();
 
     // 鉴权：JWT / API Key / Basic / IP 过滤（单一插件按策略类型分发）
-    let auth = AuthPlugin::from_configs(&policies.auth).map_err(|e| {
-        SnapshotApplyError::PluginCompile(format!("auth plugin: {e}"))
-    })?;
+    let auth = AuthPlugin::from_configs(&policies.auth)
+        .map_err(|e| SnapshotApplyError::PluginCompile(format!("auth plugin: {e}")))?;
     registry
         .register(Arc::new(auth))
         .map_err(|e| SnapshotApplyError::PluginCompile(format!("register auth: {e}")))?;
 
     // 限流：Token Bucket / Fixed Window
-    let rl = RateLimitPlugin::from_configs(&policies.rate_limit).map_err(|e| {
-        SnapshotApplyError::PluginCompile(format!("rate_limit plugin: {e}"))
-    })?;
+    let rl = RateLimitPlugin::from_configs(&policies.rate_limit)
+        .map_err(|e| SnapshotApplyError::PluginCompile(format!("rate_limit plugin: {e}")))?;
     registry
         .register(Arc::new(rl))
         .map_err(|e| SnapshotApplyError::PluginCompile(format!("register rate_limit: {e}")))?;
 
+    // WAF：策略为空时跳过注册
+    if !policies.waf.is_empty() {
+        let waf = WafPlugin::from_configs(&policies.waf)
+            .map_err(|e| SnapshotApplyError::PluginCompile(format!("waf plugin: {e}")))?;
+        registry
+            .register(Arc::new(waf))
+            .map_err(|e| SnapshotApplyError::PluginCompile(format!("register waf: {e}")))?;
+    }
+
+    // 配额：策略为空时跳过注册
+    if !policies.quota.is_empty() {
+        let quota = QuotaPlugin::from_configs(&policies.quota)
+            .map_err(|e| SnapshotApplyError::PluginCompile(format!("quota plugin: {e}")))?;
+        registry
+            .register(Arc::new(quota))
+            .map_err(|e| SnapshotApplyError::PluginCompile(format!("register quota: {e}")))?;
+    }
+
     // CORS：两个实例（预检 + 响应头），共享同一已编译策略表；
     // 策略为空时跳过注册（避免空插件进链浪费每次调用的类型检查）
     if !policies.cors.is_empty() {
-        let (cors_req, cors_resp) = build_cors_plugins(&policies.cors).map_err(|e| {
-            SnapshotApplyError::PluginCompile(format!("cors plugin: {e}"))
-        })?;
+        let (cors_req, cors_resp) = build_cors_plugins(&policies.cors)
+            .map_err(|e| SnapshotApplyError::PluginCompile(format!("cors plugin: {e}")))?;
         registry
             .register(Arc::new(cors_req))
             .map_err(|e| SnapshotApplyError::PluginCompile(format!("register cors_req: {e}")))?;
         registry
             .register(Arc::new(cors_resp))
-            .map_err(|e| {
-                SnapshotApplyError::PluginCompile(format!("register cors_resp: {e}"))
-            })?;
+            .map_err(|e| SnapshotApplyError::PluginCompile(format!("register cors_resp: {e}")))?;
     }
 
     // 熔断：guard（前置拦截）+ record（后置记账）共享同一熔断器表
-    let (cb_guard, cb_record) =
-        CircuitBreakerPlugin::from_configs(&policies.circuit_breaker).map_err(|e| {
-            SnapshotApplyError::PluginCompile(format!("circuit_breaker plugin: {e}"))
-        })?;
+    let (cb_guard, cb_record) = CircuitBreakerPlugin::from_configs(&policies.circuit_breaker)
+        .map_err(|e| SnapshotApplyError::PluginCompile(format!("circuit_breaker plugin: {e}")))?;
     registry
         .register(Arc::new(cb_guard))
         .map_err(|e| SnapshotApplyError::PluginCompile(format!("register cb_guard: {e}")))?;
@@ -271,19 +284,15 @@ fn build_plugin_registry(
         .map_err(|e| SnapshotApplyError::PluginCompile(format!("register cb_record: {e}")))?;
 
     // Header 转换：请求方向 + 响应方向两个实例，共享同一编译策略表
-    let (req_t, resp_t) = TransformPlugin::from_configs(
-        &policies.request_transform,
-        &policies.response_transform,
-    )
-    .map_err(|e| SnapshotApplyError::PluginCompile(format!("transform plugin: {e}")))?;
+    let (req_t, resp_t) =
+        TransformPlugin::from_configs(&policies.request_transform, &policies.response_transform)
+            .map_err(|e| SnapshotApplyError::PluginCompile(format!("transform plugin: {e}")))?;
     registry
         .register(Arc::new(req_t))
         .map_err(|e| SnapshotApplyError::PluginCompile(format!("register req_transform: {e}")))?;
     registry
         .register(Arc::new(resp_t))
-        .map_err(|e| {
-            SnapshotApplyError::PluginCompile(format!("register resp_transform: {e}"))
-        })?;
+        .map_err(|e| SnapshotApplyError::PluginCompile(format!("register resp_transform: {e}")))?;
 
     Ok(registry)
 }
@@ -356,9 +365,7 @@ impl SnapshotStore {
     ///
     /// 任何一步失败都不会修改当前快照。
     pub fn apply(&self, snapshot: &CompiledSnapshot) -> Result<u64, SnapshotApplyError> {
-        snapshot
-            .verify_schema()
-            .map_err(|e| SnapshotApplyError::Schema(e.message))?;
+        snapshot.verify_schema().map_err(|e| SnapshotApplyError::Schema(e.message))?;
 
         // 先在锁外构建新状态（可能因插件编译失败而失败），
         // 保证失败时旧快照完全不变。
@@ -447,7 +454,9 @@ mod tests {
                     region: None,
                 }],
                 discovery: None,
+                health_check: None,
             }],
+            certificates: vec![],
             policies: PoliciesConfig::default(),
         }
     }

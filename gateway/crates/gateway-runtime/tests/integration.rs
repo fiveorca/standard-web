@@ -329,8 +329,7 @@ async fn auth_failure_short_circuits_before_cb_and_transform() {
     let response = decision.into_response().expect("must short circuit");
     assert_eq!(response.status, http::StatusCode::UNAUTHORIZED);
 
-    let payload: serde_json::Value =
-        serde_json::from_slice(&response.body).expect("json body");
+    let payload: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
     assert_eq!(payload["code"], "GATEWAY_AUTHENTICATION_FAILED");
 }
 
@@ -366,10 +365,7 @@ async fn valid_request_passes_all_plugins() {
         let decision = run_request_phases(&registry, &mut parts, &mut ctx, route.clone())
             .await
             .expect("request phase");
-        assert!(
-            decision.is_continue(),
-            "request {i}: should pass all plugins"
-        );
+        assert!(decision.is_continue(), "request {i}: should pass all plugins");
     }
 }
 
@@ -397,10 +393,8 @@ async fn circuit_breaker_transitions_to_open_after_failures() {
         assert!(decision.is_continue());
 
         // 响应方向：模拟上游 502
-        let mut response = ResponseParts::new(
-            http::StatusCode::BAD_GATEWAY,
-            http::HeaderMap::new(),
-        );
+        let mut response =
+            ResponseParts::new(http::StatusCode::BAD_GATEWAY, http::HeaderMap::new());
         run_response_phases(&registry, &mut parts, &mut ctx, route.clone(), &mut response)
             .await
             .expect("response phase");
@@ -415,8 +409,7 @@ async fn circuit_breaker_transitions_to_open_after_failures() {
     let response = decision.into_response().expect("must short circuit");
     assert_eq!(response.status, http::StatusCode::SERVICE_UNAVAILABLE);
 
-    let payload: serde_json::Value =
-        serde_json::from_slice(&response.body).expect("json");
+    let payload: serde_json::Value = serde_json::from_slice(&response.body).expect("json");
     assert_eq!(payload["code"], "GATEWAY_CIRCUIT_OPEN");
 }
 
@@ -432,13 +425,8 @@ async fn request_and_response_transform_headers() {
     registry.init_all().await.expect("init");
 
     // 公开路由，只挂 transform
-    let route = Arc::new(route_with_all_policy_refs(
-        None,
-        None,
-        None,
-        Some("req-t1"),
-        Some("resp-t1"),
-    ));
+    let route =
+        Arc::new(route_with_all_policy_refs(None, None, None, Some("req-t1"), Some("resp-t1")));
 
     let (mut parts, mut ctx) = make_parts_and_ctx(None);
     parts.headers.insert(
@@ -451,10 +439,7 @@ async fn request_and_response_transform_headers() {
         .await
         .expect("should pass");
 
-    assert!(
-        parts.headers.get("x-internal").is_none(),
-        "X-Internal should be removed"
-    );
+    assert!(parts.headers.get("x-internal").is_none(), "X-Internal should be removed");
     assert_eq!(
         parts
             .headers
@@ -465,8 +450,7 @@ async fn request_and_response_transform_headers() {
     );
 
     // --- 响应方向 ---
-    let mut response =
-        ResponseParts::new(http::StatusCode::OK, http::HeaderMap::new());
+    let mut response = ResponseParts::new(http::StatusCode::OK, http::HeaderMap::new());
     run_response_phases(&registry, &mut parts, &mut ctx, route, &mut response)
         .await
         .expect("should pass");
@@ -500,8 +484,7 @@ async fn route_with_no_policies_all_passes() {
         .expect("should not error");
     assert!(decision.is_continue());
 
-    let mut response =
-        ResponseParts::new(http::StatusCode::OK, http::HeaderMap::new());
+    let mut response = ResponseParts::new(http::StatusCode::OK, http::HeaderMap::new());
     let decision = run_response_phases(&registry, &mut parts, &mut ctx, route, &mut response)
         .await
         .expect("should not error");

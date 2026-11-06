@@ -128,6 +128,8 @@ pub struct ResourceCounts {
     pub services: usize,
     /// 上游数量
     pub upstreams: usize,
+    /// TLS 证书数量
+    pub certificates: usize,
     /// 策略数量（所有类型合计）
     pub policies: usize,
 }
@@ -189,16 +191,15 @@ impl ConfigService {
         offset: usize,
     ) -> Result<Page<StoredResource>, ControlError> {
         let limit = limit.clamp(1, MAX_PAGE_SIZE);
-        let total = self
-            .repo
-            .count_resources(kind)
-            .await
-            .map_err(map_storage_error)?;
+        let total = self.repo.count_resources(kind).await.map_err(map_storage_error)?;
         let items = self
             .repo
             .list_resources(kind, limit, offset)
             .await
-            .map_err(map_storage_error)?;
+            .map_err(map_storage_error)?
+            .into_iter()
+            .map(|item| redact_sensitive(kind, item))
+            .collect();
         Ok(Page {
             items,
             total,
@@ -217,6 +218,7 @@ impl ConfigService {
             .get_resource(kind, id)
             .await
             .map_err(map_storage_error)?
+            .map(|resource| redact_sensitive(kind, resource))
             .ok_or_else(|| ControlError::not_found(kind.as_str(), id))
     }
 
@@ -228,11 +230,7 @@ impl ConfigService {
         actor: &str,
     ) -> Result<StoredResource, ControlError> {
         validate_payload(kind, &draft.payload, Some(&draft.id))?;
-        let created = self
-            .repo
-            .create_resource(kind, draft)
-            .await
-            .map_err(map_storage_error)?;
+        let created = self.repo.create_resource(kind, draft).await.map_err(map_storage_error)?;
 
         self.append_audit(
             AuditLogEntry::new(actor, "create")
@@ -241,7 +239,7 @@ impl ConfigService {
         )
         .await?;
 
-        Ok(created)
+        Ok(redact_sensitive(kind, created))
     }
 
     /// 更新资源并写审计。
@@ -249,21 +247,41 @@ impl ConfigService {
         &self,
         kind: ResourceKind,
         id: &str,
-        update: ResourceUpdate,
+        mut update: ResourceUpdate,
         actor: &str,
     ) -> Result<StoredResource, ControlError> {
         if update.name.is_none() && update.enabled.is_none() && update.payload.is_none() {
             return Err(ControlError::invalid_request("nothing to update"));
         }
+
+        // 证书读取接口会脱敏 key_pem；客户端把脱敏占位符原样回传时，
+        // 自动补回数据库中已有的私钥，避免“读-改-写”流程丢失私钥。
+        if matches!(kind, ResourceKind::Certificate) {
+            if let Some(payload) = update.payload.as_mut() {
+                let is_redacted = payload
+                    .get("key_pem")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| value == "[redacted]");
+                if is_redacted {
+                    let existing = self
+                        .repo
+                        .get_resource(kind, id)
+                        .await
+                        .map_err(map_storage_error)?
+                        .ok_or_else(|| ControlError::not_found(kind.as_str(), id))?;
+                    if let Some(key) = existing.payload.get("key_pem").cloned() {
+                        payload["key_pem"] = key;
+                    }
+                }
+            }
+        }
+
         if let Some(payload) = &update.payload {
             validate_payload(kind, payload, Some(id))?;
         }
 
-        let updated = self
-            .repo
-            .update_resource(kind, id, update)
-            .await
-            .map_err(map_storage_error)?;
+        let updated =
+            self.repo.update_resource(kind, id, update).await.map_err(map_storage_error)?;
 
         self.append_audit(
             AuditLogEntry::new(actor, "update")
@@ -277,7 +295,7 @@ impl ConfigService {
         )
         .await?;
 
-        Ok(updated)
+        Ok(redact_sensitive(kind, updated))
     }
 
     /// 删除资源并写审计。
@@ -294,9 +312,11 @@ impl ConfigService {
             .map_err(map_storage_error)?;
 
         self.append_audit(
-            AuditLogEntry::new(actor, "delete")
-                .with_resource(kind, id)
-                .with_detail(format!("deleted {} '{}'", kind.as_str(), id)),
+            AuditLogEntry::new(actor, "delete").with_resource(kind, id).with_detail(format!(
+                "deleted {} '{}'",
+                kind.as_str(),
+                id
+            )),
         )
         .await?;
 
@@ -315,14 +335,14 @@ impl ConfigService {
         let routes = self.load_typed::<RouteConfig>(ResourceKind::Route).await?;
         let services = self.load_typed::<ServiceConfig>(ResourceKind::Service).await?;
         let upstreams = self.load_typed::<UpstreamConfig>(ResourceKind::Upstream).await?;
+        let certificates = self
+            .load_typed::<gateway_core::CertificateConfig>(ResourceKind::Certificate)
+            .await?;
 
         let auth = self.load_typed::<AuthPolicyConfig>(ResourceKind::AuthPolicy).await?;
-        let rate_limit = self
-            .load_typed::<RateLimitPolicyConfig>(ResourceKind::RateLimitPolicy)
-            .await?;
-        let timeout = self
-            .load_typed::<TimeoutPolicyConfig>(ResourceKind::TimeoutPolicy)
-            .await?;
+        let rate_limit =
+            self.load_typed::<RateLimitPolicyConfig>(ResourceKind::RateLimitPolicy).await?;
+        let timeout = self.load_typed::<TimeoutPolicyConfig>(ResourceKind::TimeoutPolicy).await?;
         let retry = self.load_typed::<RetryPolicyConfig>(ResourceKind::RetryPolicy).await?;
         let circuit_breaker = self
             .load_typed::<CircuitBreakerPolicyConfig>(ResourceKind::CircuitBreakerPolicy)
@@ -346,6 +366,7 @@ impl ConfigService {
             routes,
             services,
             upstreams,
+            certificates,
             policies: PoliciesConfig {
                 auth,
                 rate_limit,
@@ -370,6 +391,7 @@ impl ConfigService {
             routes: bundle.routes.len(),
             services: bundle.services.len(),
             upstreams: bundle.upstreams.len(),
+            certificates: bundle.certificates.len(),
             policies: bundle.policies.auth.len()
                 + bundle.policies.rate_limit.len()
                 + bundle.policies.timeout.len()
@@ -406,9 +428,7 @@ impl ConfigService {
     pub async fn compile(&self) -> Result<CompilePreview, ControlError> {
         let bundle = self.load_bundle().await?;
         // 与发布共用同一套校验：失败时返回校验错误，不生成快照
-        bundle
-            .validate()
-            .map_err(|errors| ControlError::Validation { errors })?;
+        bundle.validate().map_err(|errors| ControlError::Validation { errors })?;
 
         let checksum = bundle.checksum()?;
         // 版本号由仓储在 commit 时分配，这里只做"预演"
@@ -463,14 +483,15 @@ impl ConfigService {
             .get_version(target_version)
             .await
             .map_err(map_storage_error)?
-            .ok_or_else(|| ControlError::not_found("config-versions", &target_version.to_string()))?;
-
-        let bundle: ResourceBundle =
-            serde_json::from_value(target.snapshot).map_err(|e| {
-                ControlError::invalid_payload(format!(
-                    "version {target_version} snapshot is not a valid resource bundle: {e}"
-                ))
+            .ok_or_else(|| {
+                ControlError::not_found("config-versions", &target_version.to_string())
             })?;
+
+        let bundle: ResourceBundle = serde_json::from_value(target.snapshot).map_err(|e| {
+            ControlError::invalid_payload(format!(
+                "version {target_version} snapshot is not a valid resource bundle: {e}"
+            ))
+        })?;
 
         // 完整性校验：历史快照的 checksum 必须仍然匹配
         let actual = bundle.checksum()?;
@@ -495,9 +516,7 @@ impl ConfigService {
         let bundle = bundle.canonicalized();
 
         // 1. 校验：失败直接返回，不写任何版本
-        bundle
-            .validate()
-            .map_err(|errors| ControlError::Validation { errors })?;
+        bundle.validate().map_err(|errors| ControlError::Validation { errors })?;
 
         // 2. checksum + 快照 JSON（快照只保存资源集合，版本号由仓储分配）
         let checksum = bundle.checksum()?;
@@ -564,10 +583,7 @@ impl ConfigService {
                 message: apply_error.clone(),
                 created_at: Utc::now(),
             };
-            self.repo
-                .record_publish(publish_record)
-                .await
-                .map_err(map_storage_error)?;
+            self.repo.record_publish(publish_record).await.map_err(map_storage_error)?;
         }
 
         Ok(PublishOutcome {
@@ -605,11 +621,7 @@ impl ConfigService {
         offset: usize,
     ) -> Result<Page<ConfigVersionRecord>, ControlError> {
         let limit = limit.clamp(1, MAX_PAGE_SIZE);
-        let items = self
-            .repo
-            .list_versions(limit, offset)
-            .await
-            .map_err(map_storage_error)?;
+        let items = self.repo.list_versions(limit, offset).await.map_err(map_storage_error)?;
         // 版本总数：用 latest_version 的版本号近似（版本号单调递增且从 1 开始）
         let total = self
             .repo
@@ -677,11 +689,7 @@ impl ConfigService {
         &self,
         kind: ResourceKind,
     ) -> Result<Vec<T>, ControlError> {
-        let items = self
-            .repo
-            .list_all_resources(kind)
-            .await
-            .map_err(map_storage_error)?;
+        let items = self.repo.list_all_resources(kind).await.map_err(map_storage_error)?;
 
         let mut decoded = Vec::with_capacity(items.len());
         for item in items {
@@ -694,11 +702,10 @@ impl ConfigService {
                     obj.insert("name".to_string(), Value::String(name.clone()));
                 }
             }
-            let value: T = serde_json::from_value(payload).map_err(|e| {
-                ControlError::InvalidPayload {
+            let value: T =
+                serde_json::from_value(payload).map_err(|e| ControlError::InvalidPayload {
                     message: format!("failed to decode {}/{}: {e}", kind.as_str(), item.id),
-                }
-            })?;
+                })?;
             decoded.push(value);
         }
         Ok(decoded)
@@ -786,28 +793,36 @@ fn validate_payload(
                 .map_err(decode_err)
         },
         // Phase 7：平台资源按强类型解码校验
-        ResourceKind::Tenant => serde_json::from_value::<gateway_core::TenantConfig>(payload.clone())
-            .map(|_| ())
-            .map_err(decode_err),
-        ResourceKind::Certificate => {
-            serde_json::from_value::<gateway_core::CertificateConfig>(payload.clone())
+        ResourceKind::Tenant => {
+            serde_json::from_value::<gateway_core::TenantConfig>(payload.clone())
                 .map(|_| ())
                 .map_err(decode_err)
         },
-        ResourceKind::ApiSpec => serde_json::from_value::<gateway_core::ApiSpecConfig>(payload.clone())
-            .map(|_| ())
-            .map_err(decode_err),
-        ResourceKind::WafPolicy => serde_json::from_value::<gateway_core::WafPolicyConfig>(payload.clone())
-            .map(|_| ())
-            .map_err(decode_err),
+        ResourceKind::Certificate => {
+            let cert = serde_json::from_value::<gateway_core::CertificateConfig>(payload.clone())
+                .map_err(decode_err)?;
+            validate_certificate_material(&cert)
+        },
+        ResourceKind::ApiSpec => {
+            serde_json::from_value::<gateway_core::ApiSpecConfig>(payload.clone())
+                .map(|_| ())
+                .map_err(decode_err)
+        },
+        ResourceKind::WafPolicy => {
+            serde_json::from_value::<gateway_core::WafPolicyConfig>(payload.clone())
+                .map(|_| ())
+                .map_err(decode_err)
+        },
         ResourceKind::QuotaPolicy => {
             serde_json::from_value::<gateway_core::QuotaPolicyConfig>(payload.clone())
                 .map(|_| ())
                 .map_err(decode_err)
         },
-        ResourceKind::Cluster => serde_json::from_value::<gateway_core::ClusterConfig>(payload.clone())
-            .map(|_| ())
-            .map_err(decode_err),
+        ResourceKind::Cluster => {
+            serde_json::from_value::<gateway_core::ClusterConfig>(payload.clone())
+                .map(|_| ())
+                .map_err(decode_err)
+        },
         // 消费者 / 凭据 / 插件：Phase 3 只做持久化，结构由后续阶段启用
         ResourceKind::Consumer
         | ResourceKind::ConsumerCredential
@@ -816,14 +831,65 @@ fn validate_payload(
     }
 }
 
+/// 敏感字段脱敏：证书私钥只在写入时接收，读取/列表/创建响应统一脱敏。
+fn redact_sensitive(kind: ResourceKind, mut resource: StoredResource) -> StoredResource {
+    if matches!(kind, ResourceKind::Certificate) {
+        if let Some(object) = resource.payload.as_object_mut() {
+            if object.contains_key("key_pem") {
+                object.insert(
+                    "key_pem".to_string(),
+                    serde_json::Value::String("[redacted]".to_string()),
+                );
+            }
+        }
+    }
+    resource
+}
+
+/// 校验证书资源的 PEM 结构、私钥可解析以及公私钥匹配。
+fn validate_certificate_material(
+    cert: &gateway_core::CertificateConfig,
+) -> Result<(), ControlError> {
+    if !cert.enabled {
+        return Ok(());
+    }
+
+    let mut cert_reader = std::io::BufReader::new(cert.cert_pem.as_bytes());
+    let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ControlError::InvalidPayload {
+                message: format!("certificate '{}': invalid certificate PEM: {e}", cert.id),
+            })?;
+    if cert_chain.is_empty() {
+        return Err(ControlError::InvalidPayload {
+            message: format!("certificate '{}': cert_pem contains no CERTIFICATE block", cert.id),
+        });
+    }
+
+    let mut key_reader = std::io::BufReader::new(cert.key_pem.as_bytes());
+    let key = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| ControlError::InvalidPayload {
+            message: format!("certificate '{}': invalid private key PEM: {e}", cert.id),
+        })?
+        .ok_or_else(|| ControlError::InvalidPayload {
+            message: format!("certificate '{}': key_pem contains no PRIVATE KEY block", cert.id),
+        })?;
+
+    let provider = rustls::crypto::ring::default_provider();
+    rustls::sign::CertifiedKey::from_der(cert_chain, key, &provider).map_err(|e| {
+        ControlError::InvalidPayload {
+            message: format!("certificate '{}': certificate and key do not match: {e}", cert.id),
+        }
+    })?;
+    Ok(())
+}
+
 /// 把存储错误映射为控制面语义错误。
 fn map_storage_error(err: StorageError) -> ControlError {
     match err {
         StorageError::NotFound { kind, id } => ControlError::not_found(&kind, &id),
-        StorageError::Conflict { kind, id } => ControlError::Conflict {
-            resource: kind,
-            id,
-        },
+        StorageError::Conflict { kind, id } => ControlError::Conflict { resource: kind, id },
         StorageError::VersionConflict {
             kind,
             id,

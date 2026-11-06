@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gateway_common::{GatewayError, RequestId};
-use gateway_config::{load_from_path, validate, CompiledSnapshot, GatewayConfig};
+use gateway_config::{load_from_path, validate, CompiledSnapshot, ConfigError, GatewayConfig};
 use gateway_core::UpstreamManager;
 use gateway_network::{HttpServer, ServerOptions};
 use gateway_observability::init_logging;
@@ -81,6 +81,10 @@ pub struct Runtime {
     /// 最大请求体大小（字节）。Content-Length 超过此值时返回 413。
     /// Chunked transfer-encoding（无 Content-Length）场景下无法提前拦截。
     max_body_size: u64,
+    /// TLS 运行时（`None` 表示明文 HTTP）。
+    tls: Option<Arc<crate::tls::RuntimeTls>>,
+    /// 被动健康检查记录器（请求失败 / 5xx 统计）
+    passive_health: Arc<crate::health::PassiveHealth>,
 }
 
 impl Runtime {
@@ -134,8 +138,7 @@ impl Runtime {
             INITIAL_CONFIG_VERSION
         };
         let snapshots = Arc::new(
-            SnapshotStore::from_config_with_version(&cfg, initial_version)
-                .map_err(|e| vec![e])?,
+            SnapshotStore::from_config_with_version(&cfg, initial_version).map_err(|e| vec![e])?,
         );
         tracing::info!(
             target: "runtime",
@@ -155,11 +158,18 @@ impl Runtime {
         // Bulkhead：用 RuntimeConfig.max_concurrent_requests 初始化
         // Semaphore 大小；Arc 让多线程（handle_request 被 hyper service_fn 调用）
         // 共享同一个限流槽位池
-        let bulkhead = Arc::new(tokio::sync::Semaphore::new(
-            cfg.runtime.max_concurrent_requests as usize,
-        ));
+        let bulkhead =
+            Arc::new(tokio::sync::Semaphore::new(cfg.runtime.max_concurrent_requests as usize));
         // 在 move cfg 到 Self 之前提前取出 max_body_size（避免 move 后再访问）
         let max_body_size = cfg.runtime.max_request_body_size;
+
+        // TLS：启用 HTTPS 时预先加载证书；证书非法直接拒绝启动。
+        let tls = crate::tls::RuntimeTls::build(&cfg).map_err(|message| {
+            vec![ConfigError {
+                path: "server.http.tls".into(),
+                message,
+            }]
+        })?;
 
         Ok(Self {
             config: cfg,
@@ -167,6 +177,8 @@ impl Runtime {
             proxy_client,
             bulkhead,
             max_body_size,
+            tls,
+            passive_health: Arc::new(crate::health::PassiveHealth::new()),
         })
     }
 
@@ -223,13 +235,8 @@ impl Runtime {
             tokio::spawn(async move {
                 // admin::start_admin_server 是 Axum 启动入口；
                 // extra_admin 为控制面路由（integrated 模式）
-                crate::admin::start_admin_server(
-                    admin_addr,
-                    rt_clone,
-                    admin_shutdown,
-                    extra_admin,
-                )
-                .await
+                crate::admin::start_admin_server(admin_addr, rt_clone, admin_shutdown, extra_admin)
+                    .await
             })
         } else {
             tracing::info!("admin server disabled");
@@ -252,7 +259,10 @@ impl Runtime {
             graceful_shutdown_timeout_secs: rt.config.runtime.graceful_shutdown_timeout_secs,
         };
 
-        let http_server = HttpServer::new(http_addr, http_options);
+        let http_server = match rt.tls.as_ref() {
+            Some(tls) => HttpServer::new(http_addr, http_options).with_tls(tls.runtime()),
+            None => HttpServer::new(http_addr, http_options),
+        };
         let rt_for_http = rt.clone();
 
         // handler 闭包签名：
@@ -283,6 +293,39 @@ impl Runtime {
         // 对配置了 upstreams[].discovery 的上游定期刷新端点。
         // 未配置 discovery 时该任务只做空转 tick，开销可忽略。
         crate::discovery::spawn(rt.snapshots.clone());
+
+        // =================================================================
+        // 2.5.1 主动健康检查后台任务
+        // =================================================================
+        // 对配置了 upstreams[].health_check 的上游周期探测端点；
+        // 未配置时任务只做空转 tick。
+        crate::health::spawn(rt.snapshots.clone(), shutdown_token.clone());
+
+        // =================================================================
+        // 2.6 文件证书热重载后台任务
+        // =================================================================
+        // 监听 cert_file/key_file 的 mtime 变化，变化后重新加载并原子替换
+        // SNI 证书集合。控制面发布的证书由快照应用路径热更新，不在此轮询。
+        if let Some(tls) = rt.tls.clone() {
+            if tls.has_file_certificate() {
+                let interval = tls.reload_interval();
+                let shutdown = shutdown_token.clone();
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(interval);
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            _ = ticker.tick() => {
+                                if let Err(err) = tls.reload_files_if_changed() {
+                                    tracing::warn!(target: "tls", error = %err, "file certificate reload failed; keeping previous certificate");
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
 
         // =================================================================
         // 3. 安装信号处理：SIGTERM/SIGINT → CancellationToken.cancel()
@@ -415,10 +458,7 @@ impl Runtime {
                     let resp = body::error_response(
                         StatusCode::PAYLOAD_TOO_LARGE,
                         ErrorCode::GatewayRequestTooLarge.as_str(),
-                        &format!(
-                            "request body size {} exceeds limit {}",
-                            len, self.max_body_size
-                        ),
+                        &format!("request body size {} exceeds limit {}", len, self.max_body_size),
                         ctx.request_id.as_str(),
                     );
                     return Ok(resp);
@@ -487,12 +527,7 @@ impl Runtime {
 
                 // Stage 1: RequestPostRoute —— rate_limit（429 短路）+ cors_request（OPTIONS 预检 204/403/405）
                 // 插件按 (priority, name) 升序执行；空链 run() 直接返回 Continue
-                let mut pctx = PluginContext::new(
-                    &mut parts,
-                    &mut ctx,
-                    Some(route.clone()),
-                    None,
-                );
+                let mut pctx = PluginContext::new(&mut parts, &mut ctx, Some(route.clone()), None);
                 match state.chain(PluginPhase::RequestPostRoute).run(&mut pctx).await {
                     Ok(PluginDecision::Continue) => {},
                     Ok(PluginDecision::ShortCircuit(resp)) => {
@@ -509,10 +544,8 @@ impl Runtime {
                     Err(plugin_err) => {
                         // 插件内部故障 → fail closed → 500
                         tracing::error!(target: "plugin", error = %plugin_err, "plugin error in request_post_route");
-                        let final_resp = plugin_error_to_response(
-                            plugin_err,
-                            ctx.request_id.as_str(),
-                        );
+                        let final_resp =
+                            plugin_error_to_response(plugin_err, ctx.request_id.as_str());
                         ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
                         return Ok(body::observe(final_resp, ctx));
                     },
@@ -521,12 +554,7 @@ impl Runtime {
                 // 下一个阶段可以重新构造 PluginContext 继续使用
 
                 // Stage 2: Authentication —— auth（JWT/API Key/Basic/IP 过滤 → 401/403 短路）
-                let mut pctx = PluginContext::new(
-                    &mut parts,
-                    &mut ctx,
-                    Some(route.clone()),
-                    None,
-                );
+                let mut pctx = PluginContext::new(&mut parts, &mut ctx, Some(route.clone()), None);
                 match state.chain(PluginPhase::Authentication).run(&mut pctx).await {
                     Ok(PluginDecision::Continue) => {},
                     Ok(PluginDecision::ShortCircuit(resp)) => {
@@ -542,22 +570,15 @@ impl Runtime {
                     },
                     Err(plugin_err) => {
                         tracing::error!(target: "plugin", error = %plugin_err, "plugin error in authentication");
-                        let final_resp = plugin_error_to_response(
-                            plugin_err,
-                            ctx.request_id.as_str(),
-                        );
+                        let final_resp =
+                            plugin_error_to_response(plugin_err, ctx.request_id.as_str());
                         ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
                         return Ok(body::observe(final_resp, ctx));
                     },
                 }
 
                 // Stage 3: RequestPreUpstream —— request_transform（改写 headers）+ circuit_breaker_guard（熔断拦截）
-                let mut pctx = PluginContext::new(
-                    &mut parts,
-                    &mut ctx,
-                    Some(route.clone()),
-                    None,
-                );
+                let mut pctx = PluginContext::new(&mut parts, &mut ctx, Some(route.clone()), None);
                 match state.chain(PluginPhase::RequestPreUpstream).run(&mut pctx).await {
                     Ok(PluginDecision::Continue) => {},
                     Ok(PluginDecision::ShortCircuit(resp)) => {
@@ -572,10 +593,8 @@ impl Runtime {
                     },
                     Err(plugin_err) => {
                         tracing::error!(target: "plugin", error = %plugin_err, "plugin error in request_pre_upstream");
-                        let final_resp = plugin_error_to_response(
-                            plugin_err,
-                            ctx.request_id.as_str(),
-                        );
+                        let final_resp =
+                            plugin_error_to_response(plugin_err, ctx.request_id.as_str());
                         ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
                         return Ok(body::observe(final_resp, ctx));
                     },
@@ -620,7 +639,8 @@ impl Runtime {
                         // - 非幂等方法也不允许重试（即使 endpoint selection 层）
                         // - retry policy 只在 max_attempts > 1 时启用，默认 1
                         let method_upper = parts.method.as_str().to_ascii_uppercase();
-                        let is_idempotent = matches!(method_upper.as_str(), "GET" | "HEAD" | "PUT" | "DELETE");
+                        let is_idempotent =
+                            matches!(method_upper.as_str(), "GET" | "HEAD" | "PUT" | "DELETE");
                         let retry_policy = route
                             .retry_policy_id
                             .as_deref()
@@ -738,9 +758,8 @@ impl Runtime {
                                     target: "runtime",
                                     "pick endpoint retry loop produced no endpoint (logic bug)"
                                 );
-                                let msg = format!(
-                                    "upstream {upstream_id} has no healthy endpoints"
-                                );
+                                let msg =
+                                    format!("upstream {upstream_id} has no healthy endpoints");
                                 ctx.finish_with_error(
                                     ErrorCode::GatewayUpstreamUnavailable.as_str().to_string(),
                                     msg.clone(),
@@ -752,7 +771,7 @@ impl Runtime {
                                     ctx.request_id.as_str(),
                                 );
                                 return Ok(body::observe(resp, ctx));
-                            }
+                            },
                         };
 
                         ctx.set_endpoint(endpoint.clone());
@@ -768,19 +787,21 @@ impl Runtime {
                         //   1. 用 TeeBody 把请求体分叉（Bytes 克隆，不复制内存）
                         //   2. 主请求继续走原路径（此处改用 BoxBody 擦除客户端）
                         //   3. 影子请求在独立 task 中异步发送，失败只记日志
-                        let mirror_shadow_service: Option<String> = route.mirror.as_ref().and_then(|m| {
-                            if !crate::mirror::sampled(m.percentage) {
-                                return None;
-                            }
-                            Some(m.service_id.clone())
-                        });
+                        let mirror_shadow_service: Option<String> =
+                            route.mirror.as_ref().and_then(|m| {
+                                if !crate::mirror::sampled(m.percentage) {
+                                    return None;
+                                }
+                                Some(m.service_id.clone())
+                            });
 
                         // Least Connections：转发前占用端点，响应头返回后释放
                         state
                             .upstream_registry
                             .on_connection_start(&upstream_id, &endpoint.runtime_id);
 
-                        let forward_result = if let Some(shadow_service_id) = mirror_shadow_service {
+                        let forward_result = if let Some(shadow_service_id) = mirror_shadow_service
+                        {
                             // ---- 有镜像：主/影子共享同一份 tee 出来的请求体 ----
                             let (main_body, shadow_body) = crate::mirror::tee(body);
                             let main_req = http::Request::from_parts(
@@ -844,142 +865,162 @@ impl Runtime {
                             .upstream_registry
                             .on_connection_end(&upstream_id, &endpoint.runtime_id);
 
-                        match forward_result
-                        {
-                                    // 上游返回任何 HTTP 响应（2xx/3xx/4xx/5xx）都算"代理成功"——
-                                    // 我们只透传，不解释业务语义
-                                    Ok(mut upstream_resp) => {
-                                        ctx.mark_upstream_headers();
+                        match forward_result {
+                            // 上游返回任何 HTTP 响应（2xx/3xx/4xx/5xx）都算"代理成功"——
+                            // 我们只透传，不解释业务语义
+                            Ok(mut upstream_resp) => {
+                                ctx.mark_upstream_headers();
 
-                                        // WebSocket / HTTP Upgrade：上游返回 101 时，
-                                        // 把客户端与上游两条已升级的连接桥接起来，
-                                        // 之后的双向帧透传由 copy_bidirectional 完成。
-                                        if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
-                                            let upstream_on_upgrade =
-                                                hyper::upgrade::on(&mut upstream_resp);
-                                            tokio::spawn(bridge_upgrade(client_on_upgrade, upstream_on_upgrade));
-                                        }
+                                // 被动健康检查：5xx 记为失败，其余记为成功
+                                self.record_passive_health(
+                                    &state,
+                                    &upstream_id,
+                                    &endpoint,
+                                    !upstream_resp.status().is_server_error(),
+                                )
+                                .await;
 
-                                        // 构造响应方向插件可见的 ResponseParts 视图
-                                        // （status + headers 是可写副本；body 不暴露给插件，
-                                        // 保持 Incoming 流式透传零拷贝）
-                                        let mut response_parts = gateway_plugin::ResponseParts::new(
-                                            upstream_resp.status(),
-                                            upstream_resp.headers().clone(),
-                                        );
-
-                                        // Stage 4: UpstreamResponse —— circuit_breaker_record（熔断结果记账）
-                                        // 此阶段插件只做"观测/记账"，理论上不应短路；
-                                        // 若插件短路则直接返回短路响应（极端场景）
-                                        {
-                                            let mut pctx = PluginContext::new(
-                                                &mut parts_for_response,
-                                                &mut ctx,
-                                                Some(route.clone()),
-                                                Some(&mut response_parts),
-                                            );
-                                            match state
-                                                .chain(PluginPhase::UpstreamResponse)
-                                                .run(&mut pctx)
-                                                .await
-                                            {
-                                                Ok(PluginDecision::Continue) => {},
-                                                Ok(PluginDecision::ShortCircuit(resp)) => {
-                                                    // 罕见：插件决定吞掉上游响应自己返回
-                                                    let final_resp = plugin_response_to_response(resp);
-                                                    ctx.status_code = Some(final_resp.status().as_u16());
-                                                    return Ok(body::observe(final_resp, ctx));
-                                                },
-                                                Err(plugin_err) => {
-                                                    tracing::error!(target: "plugin", error = %plugin_err, "plugin error in upstream_response");
-                                                    let final_resp = plugin_error_to_response(
-                                                        plugin_err,
-                                                        ctx.request_id.as_str(),
-                                                    );
-                                                    ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
-                                                    return Ok(body::observe(final_resp, ctx));
-                                                },
-                                            }
-                                        }
-
-                                        // Stage 5: ResponsePreClient —— response_transform（改写响应头）+ cors_response（追加 CORS 头）
-                                        // 此阶段插件主要修改 response_parts.headers，例如：
-                                        //   - response_transform：注入自定义响应头、删除敏感头
-                                        //   - cors_response：追加 Access-Control-Allow-Origin / Allow-Credentials / Expose-Headers / Vary
-                                        {
-                                            let mut pctx = PluginContext::new(
-                                                &mut parts_for_response,
-                                                &mut ctx,
-                                                Some(route.clone()),
-                                                Some(&mut response_parts),
-                                            );
-                                            match state
-                                                .chain(PluginPhase::ResponsePreClient)
-                                                .run(&mut pctx)
-                                                .await
-                                            {
-                                                Ok(PluginDecision::Continue) => {},
-                                                Ok(PluginDecision::ShortCircuit(resp)) => {
-                                                    let final_resp = plugin_response_to_response(resp);
-                                                    ctx.status_code = Some(final_resp.status().as_u16());
-                                                    return Ok(body::observe(final_resp, ctx));
-                                                },
-                                                Err(plugin_err) => {
-                                                    tracing::error!(target: "plugin", error = %plugin_err, "plugin error in response_pre_client");
-                                                    let final_resp = plugin_error_to_response(
-                                                        plugin_err,
-                                                        ctx.request_id.as_str(),
-                                                    );
-                                                    ctx.status_code = Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
-                                                    return Ok(body::observe(final_resp, ctx));
-                                                },
-                                            }
-                                        }
-
-                                        // 把插件修改后的 status / headers 原地写回 upstream_resp
-                                        // ResponseParts::status / headers 都是插件可写的，
-                                        // upstream_resp 的 Incoming body 保持不变，继续流式透传
-                                        *upstream_resp.status_mut() = response_parts.status;
-                                        *upstream_resp.headers_mut() = response_parts.headers;
-
-                                        // Phase 7：已废弃 API 的弃用标记（RFC 8594）
-                                        if route.lifecycle == gateway_core::LifecycleStatus::Deprecated {
-                                            upstream_resp.headers_mut().insert(
-                                                "deprecation",
-                                                HeaderValue::from_static("true"),
-                                            );
-                                            // 中文语义的附加头，便于非标准客户端识别
-                                            upstream_resp.headers_mut().insert(
-                                                "x-api-deprecated",
-                                                HeaderValue::from_static("true"),
-                                            );
-                                        }
-
-                                        // 状态码写入 ctx；request_end 由 ObservedBody
-                                        // 在 body 流结束/断开时写入，保证总耗时统计准确
-                                        ctx.status_code = Some(response_parts.status.as_u16());
-
-                                        // 流式透传（P2.0 核心）：
-                                        //   Incoming --body::boxed()--> BoxBody<Bytes, BoxError>
-                                        //   零拷贝，不在网关内存中聚合整个响应
-                                        let resp = upstream_resp.map(body::boxed);
-
-                                        // 包装 ObservedBody：body 流结束/断开时输出 AccessLog
-                                        return Ok(body::observe(resp, ctx));
-                                    },
-                                    // 上游连接失败 / 超时 → 502 / 504
-                                    Err(gateway_err) => {
-                                        ctx.finish_with_error(
-                                            gateway_err.code().as_str().to_string(),
-                                            gateway_err.to_string(),
-                                        );
-                                        (
-                                            gateway_err.code().to_http_status(),
-                                            gateway_err.code().as_str().to_string(),
-                                            gateway_err.to_string(),
-                                        )
-                                    },
+                                // WebSocket / HTTP Upgrade：上游返回 101 时，
+                                // 把客户端与上游两条已升级的连接桥接起来，
+                                // 之后的双向帧透传由 copy_bidirectional 完成。
+                                if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+                                    let upstream_on_upgrade =
+                                        hyper::upgrade::on(&mut upstream_resp);
+                                    tokio::spawn(bridge_upgrade(
+                                        client_on_upgrade,
+                                        upstream_on_upgrade,
+                                    ));
                                 }
+
+                                // 构造响应方向插件可见的 ResponseParts 视图
+                                // （status + headers 是可写副本；body 不暴露给插件，
+                                // 保持 Incoming 流式透传零拷贝）
+                                let mut response_parts = gateway_plugin::ResponseParts::new(
+                                    upstream_resp.status(),
+                                    upstream_resp.headers().clone(),
+                                );
+
+                                // Stage 4: UpstreamResponse —— circuit_breaker_record（熔断结果记账）
+                                // 此阶段插件只做"观测/记账"，理论上不应短路；
+                                // 若插件短路则直接返回短路响应（极端场景）
+                                {
+                                    let mut pctx = PluginContext::new(
+                                        &mut parts_for_response,
+                                        &mut ctx,
+                                        Some(route.clone()),
+                                        Some(&mut response_parts),
+                                    );
+                                    match state
+                                        .chain(PluginPhase::UpstreamResponse)
+                                        .run(&mut pctx)
+                                        .await
+                                    {
+                                        Ok(PluginDecision::Continue) => {},
+                                        Ok(PluginDecision::ShortCircuit(resp)) => {
+                                            // 罕见：插件决定吞掉上游响应自己返回
+                                            let final_resp = plugin_response_to_response(resp);
+                                            ctx.status_code = Some(final_resp.status().as_u16());
+                                            return Ok(body::observe(final_resp, ctx));
+                                        },
+                                        Err(plugin_err) => {
+                                            tracing::error!(target: "plugin", error = %plugin_err, "plugin error in upstream_response");
+                                            let final_resp = plugin_error_to_response(
+                                                plugin_err,
+                                                ctx.request_id.as_str(),
+                                            );
+                                            ctx.status_code =
+                                                Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+                                            return Ok(body::observe(final_resp, ctx));
+                                        },
+                                    }
+                                }
+
+                                // Stage 5: ResponsePreClient —— response_transform（改写响应头）+ cors_response（追加 CORS 头）
+                                // 此阶段插件主要修改 response_parts.headers，例如：
+                                //   - response_transform：注入自定义响应头、删除敏感头
+                                //   - cors_response：追加 Access-Control-Allow-Origin / Allow-Credentials / Expose-Headers / Vary
+                                {
+                                    let mut pctx = PluginContext::new(
+                                        &mut parts_for_response,
+                                        &mut ctx,
+                                        Some(route.clone()),
+                                        Some(&mut response_parts),
+                                    );
+                                    match state
+                                        .chain(PluginPhase::ResponsePreClient)
+                                        .run(&mut pctx)
+                                        .await
+                                    {
+                                        Ok(PluginDecision::Continue) => {},
+                                        Ok(PluginDecision::ShortCircuit(resp)) => {
+                                            let final_resp = plugin_response_to_response(resp);
+                                            ctx.status_code = Some(final_resp.status().as_u16());
+                                            return Ok(body::observe(final_resp, ctx));
+                                        },
+                                        Err(plugin_err) => {
+                                            tracing::error!(target: "plugin", error = %plugin_err, "plugin error in response_pre_client");
+                                            let final_resp = plugin_error_to_response(
+                                                plugin_err,
+                                                ctx.request_id.as_str(),
+                                            );
+                                            ctx.status_code =
+                                                Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+                                            return Ok(body::observe(final_resp, ctx));
+                                        },
+                                    }
+                                }
+
+                                // 把插件修改后的 status / headers 原地写回 upstream_resp
+                                // ResponseParts::status / headers 都是插件可写的，
+                                // upstream_resp 的 Incoming body 保持不变，继续流式透传
+                                *upstream_resp.status_mut() = response_parts.status;
+                                *upstream_resp.headers_mut() = response_parts.headers;
+
+                                // 请求阶段插件预置的响应 Header（如配额信息）
+                                for (name, value) in ctx.response_headers.iter() {
+                                    upstream_resp.headers_mut().insert(name.clone(), value.clone());
+                                }
+
+                                // Phase 7：已废弃 API 的弃用标记（RFC 8594）
+                                if route.lifecycle == gateway_core::LifecycleStatus::Deprecated {
+                                    upstream_resp
+                                        .headers_mut()
+                                        .insert("deprecation", HeaderValue::from_static("true"));
+                                    // 中文语义的附加头，便于非标准客户端识别
+                                    upstream_resp.headers_mut().insert(
+                                        "x-api-deprecated",
+                                        HeaderValue::from_static("true"),
+                                    );
+                                }
+
+                                // 状态码写入 ctx；request_end 由 ObservedBody
+                                // 在 body 流结束/断开时写入，保证总耗时统计准确
+                                ctx.status_code = Some(response_parts.status.as_u16());
+
+                                // 流式透传（P2.0 核心）：
+                                //   Incoming --body::boxed()--> BoxBody<Bytes, BoxError>
+                                //   零拷贝，不在网关内存中聚合整个响应
+                                let resp = upstream_resp.map(body::boxed);
+
+                                // 包装 ObservedBody：body 流结束/断开时输出 AccessLog
+                                return Ok(body::observe(resp, ctx));
+                            },
+                            // 上游连接失败 / 超时 → 502 / 504
+                            Err(gateway_err) => {
+                                // 被动健康检查：连接失败 / 超时记为失败
+                                self.record_passive_health(&state, &upstream_id, &endpoint, false)
+                                    .await;
+                                ctx.finish_with_error(
+                                    gateway_err.code().as_str().to_string(),
+                                    gateway_err.to_string(),
+                                );
+                                (
+                                    gateway_err.code().to_http_status(),
+                                    gateway_err.code().as_str().to_string(),
+                                    gateway_err.to_string(),
+                                )
+                            },
+                        }
                     },
                 }
             },
@@ -1026,6 +1067,29 @@ impl Runtime {
         // 发送完成或客户端断开时输出（错误 body 很小，与立即输出差别不大，
         // 但保持两条路径的日志时序语义一致）
         Ok(body::observe(resp, ctx))
+    }
+
+    // ------------------------------------------------------------------
+    // 被动健康检查
+    // ------------------------------------------------------------------
+
+    /// 记录一次上游请求结果（仅当该上游配置了 `health_check.passive.enabled`）。
+    async fn record_passive_health(
+        &self,
+        state: &crate::state::RuntimeState,
+        upstream_id: &str,
+        endpoint: &gateway_core::Endpoint,
+        success: bool,
+    ) {
+        let Some(cfg) = state.upstream_configs.iter().find(|u| u.id == upstream_id) else {
+            return;
+        };
+        let Some(passive) = cfg.health_check.as_ref().map(|h| &h.passive) else {
+            return;
+        };
+        self.passive_health
+            .record(&state.upstream_registry, upstream_id, endpoint, success, passive)
+            .await;
     }
 
     // ------------------------------------------------------------------
@@ -1087,11 +1151,23 @@ impl Runtime {
     ///
     /// 失败时旧配置继续生效；调用方（控制面服务）负责把失败记录为
     /// 实例应用失败。
-    pub fn apply_snapshot(
-        &self,
-        snapshot: &CompiledSnapshot,
-    ) -> Result<u64, SnapshotApplyError> {
-        self.snapshots.apply(snapshot)
+    pub fn apply_snapshot(&self, snapshot: &CompiledSnapshot) -> Result<u64, SnapshotApplyError> {
+        // 两阶段：先解析校验 TLS 证书（不改变运行中状态），
+        // 配置版本应用成功后再提交证书，保证证书与配置版本一致。
+        let prepared_tls = match self.tls.as_ref() {
+            Some(tls) => Some(
+                tls.prepare_snapshot(&snapshot.bundle.certificates)
+                    .map_err(SnapshotApplyError::Tls)?,
+            ),
+            None => None,
+        };
+
+        let version = self.snapshots.apply(snapshot)?;
+
+        if let (Some(tls), Some(prepared)) = (self.tls.as_ref(), prepared_tls) {
+            tls.commit_snapshot(prepared);
+        }
+        Ok(version)
     }
 }
 
@@ -1197,7 +1273,8 @@ async fn bridge_upgrade(client: hyper::upgrade::OnUpgrade, upstream: hyper::upgr
             // 适配成 tokio::io::{AsyncRead, AsyncWrite}
             let mut client_io = hyper_util::rt::TokioIo::new(client_io);
             let mut upstream_io = hyper_util::rt::TokioIo::new(upstream_io);
-            if let Err(err) = tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await {
+            if let Err(err) = tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await
+            {
                 tracing::debug!(error = %err, "upgraded connection closed");
             }
         },

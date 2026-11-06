@@ -270,7 +270,10 @@ pub struct LeastConnectionsBalancer {
 impl LeastConnectionsBalancer {
     /// 创建空的最少连接均衡器。
     pub fn new() -> Self {
-        Self { active: Mutex::new(HashMap::new()), counter: AtomicU64::new(0) }
+        Self {
+            active: Mutex::new(HashMap::new()),
+            counter: AtomicU64::new(0),
+        }
     }
 }
 
@@ -337,7 +340,9 @@ pub struct IpHashBalancer {
 impl IpHashBalancer {
     /// 创建新的 IP Hash 均衡器。
     pub fn new() -> Self {
-        Self { counter: AtomicU64::new(0) }
+        Self {
+            counter: AtomicU64::new(0),
+        }
     }
 }
 
@@ -392,7 +397,9 @@ pub struct ConsistentHashBalancer {
 impl ConsistentHashBalancer {
     /// 创建新的一致性哈希均衡器。
     pub fn new() -> Self {
-        Self { counter: AtomicU64::new(0) }
+        Self {
+            counter: AtomicU64::new(0),
+        }
     }
 }
 
@@ -457,7 +464,9 @@ pub struct ZoneAwareBalancer {
 impl ZoneAwareBalancer {
     /// 创建新的区域感知均衡器。
     pub fn new() -> Self {
-        Self { counter: AtomicU64::new(0) }
+        Self {
+            counter: AtomicU64::new(0),
+        }
     }
 }
 
@@ -485,12 +494,13 @@ impl LoadBalancer for ZoneAwareBalancer {
             return self.select(healthy);
         };
         // 优先同 zone 端点
-        let same_zone: Vec<&Endpoint> = healthy
-            .iter()
-            .copied()
-            .filter(|ep| ep.zone.as_deref() == Some(zone))
-            .collect();
-        let candidates = if same_zone.is_empty() { healthy.to_vec() } else { same_zone };
+        let same_zone: Vec<&Endpoint> =
+            healthy.iter().copied().filter(|ep| ep.zone.as_deref() == Some(zone)).collect();
+        let candidates = if same_zone.is_empty() {
+            healthy.to_vec()
+        } else {
+            same_zone
+        };
         if candidates.is_empty() {
             return None;
         }

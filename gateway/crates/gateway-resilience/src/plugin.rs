@@ -52,7 +52,10 @@ pub struct CircuitBreakerPlugin {
 
 impl CircuitBreakerPlugin {
     pub fn new(policies: Arc<CompiledResiliencePolicies>, direction: CbDirection) -> Self {
-        Self { policies, direction }
+        Self {
+            policies,
+            direction,
+        }
     }
 
     /// 从配置直接编译并构造一对插件。
@@ -61,10 +64,12 @@ impl CircuitBreakerPlugin {
     ) -> Result<(Self, Self), PluginError> {
         // Timeout / Retry 插件不单独实现，但编译入口是统一的；
         // 这里只给 breakers 部分填数据，其余传空切片
-        let policies = CompiledResiliencePolicies::compile(&[], &[], cb_configs)
-            .map_err(|message| PluginError::ConfigInvalid {
-                plugin: PLUGIN_NAME.into(),
-                message,
+        let policies =
+            CompiledResiliencePolicies::compile(&[], &[], cb_configs).map_err(|message| {
+                PluginError::ConfigInvalid {
+                    plugin: PLUGIN_NAME.into(),
+                    message,
+                }
             })?;
         let policies = Arc::new(policies);
         Ok((
@@ -148,10 +153,7 @@ impl Plugin for CircuitBreakerPlugin {
         Ok(())
     }
 
-    async fn execute(
-        &self,
-        ctx: &mut PluginContext<'_>,
-    ) -> Result<PluginDecision, PluginError> {
+    async fn execute(&self, ctx: &mut PluginContext<'_>) -> Result<PluginDecision, PluginError> {
         // 1) 必须有 route
         let Some(route) = ctx.route.as_ref() else {
             return Err(PluginError::ExecutionFailed {
@@ -172,9 +174,7 @@ impl Plugin for CircuitBreakerPlugin {
         let Some(breaker) = self.policies.get_breaker(policy_id) else {
             return Err(PluginError::ExecutionFailed {
                 plugin: self.name().to_string(),
-                message: format!(
-                    "circuit breaker policy '{policy_id}' was not compiled"
-                ),
+                message: format!("circuit breaker policy '{policy_id}' was not compiled"),
             });
         };
 
@@ -208,8 +208,7 @@ impl Plugin for CircuitBreakerPlugin {
                 let Some(response) = ctx.response.as_ref() else {
                     return Err(PluginError::ExecutionFailed {
                         plugin: self.name().to_string(),
-                        message: "circuit breaker record invoked without response view"
-                            .to_string(),
+                        message: "circuit breaker record invoked without response view".to_string(),
                     });
                 };
 
@@ -235,9 +234,7 @@ mod tests {
 
     /// 辅助：构造 RouteConfig（带 circuit_breaker_policy_id）
     fn route_with_cb(id: Option<&str>) -> gateway_core::models::RouteConfig {
-        let mut json = String::from(
-            r#"{"id":"r1","path_value":"/","service_id":"svc"}"#,
-        );
+        let mut json = String::from(r#"{"id":"r1","path_value":"/","service_id":"svc"}"#);
         if let Some(id) = id {
             json = format!(
                 r#"{{"id":"r1","path_value":"/","service_id":"svc","circuit_breaker_policy_id":"{id}"}}"#
@@ -260,7 +257,8 @@ mod tests {
 
     /// 辅助：构造熔断插件对（failure_threshold=3, open_duration=50ms）
     fn make_plugin_pair() -> (CircuitBreakerPlugin, CircuitBreakerPlugin) {
-        let json = r#"[{"id":"cb1","failure_threshold":3,"success_threshold":2,"open_duration_secs":1}]"#;
+        let json =
+            r#"[{"id":"cb1","failure_threshold":3,"success_threshold":2,"open_duration_secs":1}]"#;
         let configs: Vec<CircuitBreakerPolicyConfig> =
             serde_json::from_str(json).expect("deserialize");
         CircuitBreakerPlugin::from_configs(&configs).expect("compile")
@@ -307,8 +305,7 @@ mod tests {
         let response = decision.into_response().expect("short circuit");
         assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
 
-        let payload: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("json");
+        let payload: serde_json::Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(payload["code"], "GATEWAY_CIRCUIT_OPEN");
     }
 
@@ -356,10 +353,8 @@ mod tests {
         // 4 次 200 → HalfOpen 后恢复 Closed
         for _ in 0..4 {
             let (mut parts, mut ctx) = make_ctx();
-            let mut resp_parts = gateway_plugin::ResponseParts::new(
-                StatusCode::OK,
-                HeaderMap::new(),
-            );
+            let mut resp_parts =
+                gateway_plugin::ResponseParts::new(StatusCode::OK, HeaderMap::new());
             let mut plugin_ctx = PluginContext::new(
                 &mut parts,
                 &mut ctx,

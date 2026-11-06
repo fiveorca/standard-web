@@ -56,10 +56,7 @@ async fn list_resources_impl(
     limit: usize,
     offset: usize,
 ) -> Result<Json<PageView<ResourceView>>, ApiError> {
-    let page: Page<StoredResource> = state
-        .service
-        .list_resources(kind, limit, offset)
-        .await?;
+    let page: Page<StoredResource> = state.service.list_resources(kind, limit, offset).await?;
     Ok(Json(map_page(page, ResourceView::from)))
 }
 
@@ -80,10 +77,7 @@ async fn create_resource_impl(
     draft: ResourceDraft,
     actor: &str,
 ) -> Result<(StatusCode, Json<ResourceView>), ApiError> {
-    let created = state
-        .service
-        .create_resource(kind, draft, actor)
-        .await?;
+    let created = state.service.create_resource(kind, draft, actor).await?;
     Ok((StatusCode::CREATED, Json(ResourceView::from(created))))
 }
 
@@ -95,10 +89,7 @@ async fn update_resource_impl(
     update: ResourceUpdate,
     actor: &str,
 ) -> Result<Json<ResourceView>, ApiError> {
-    let updated = state
-        .service
-        .update_resource(kind, id, update, actor)
-        .await?;
+    let updated = state.service.update_resource(kind, id, update, actor).await?;
     Ok(Json(ResourceView::from(updated)))
 }
 
@@ -110,10 +101,7 @@ async fn delete_resource_impl(
     expected_version: Option<i64>,
     actor: &str,
 ) -> Result<StatusCode, ApiError> {
-    state
-        .service
-        .delete_resource(kind, id, expected_version, actor)
-        .await?;
+    state.service.delete_resource(kind, id, expected_version, actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -183,14 +171,7 @@ pub async fn delete_resource(
 ) -> Result<StatusCode, ApiError> {
     principal.require_admin()?;
     let kind = parse_kind(&kind)?;
-    delete_resource_impl(
-        &state,
-        kind,
-        &id,
-        query.expected_version,
-        &principal.actor,
-    )
-    .await
+    delete_resource_impl(&state, kind, &id, query.expected_version, &principal.actor).await
 }
 
 // ---- consumers 别名路由 handler（设计文档 8.5） ----
@@ -391,10 +372,7 @@ pub async fn rollback(
     principal.require_admin()?;
     // 请求体可省略：没有 body 时使用自动生成的备注
     let note = body.and_then(|Json(request)| request.note);
-    let outcome = state
-        .service
-        .rollback(version, &principal.actor, note)
-        .await?;
+    let outcome = state.service.rollback(version, &principal.actor, note).await?;
     Ok(Json(PublishView::from(outcome)))
 }
 
@@ -408,10 +386,7 @@ pub async fn list_versions(
     _principal: Principal,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<PageView<VersionView>>, ApiError> {
-    let page = state
-        .service
-        .list_versions(query.limit(), query.offset())
-        .await?;
+    let page = state.service.list_versions(query.limit(), query.offset()).await?;
     Ok(Json(map_page(page, VersionView::from)))
 }
 
@@ -478,9 +453,10 @@ pub async fn create_credential(
     principal.require_admin()?;
     // 请求体必须带 id（凭据唯一标识），作为外部消费者侧的凭据 ID；
     // ResourceKind::ConsumerCredential 路由通过父 consumer_id 归属校验
-    let id = body.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
-        ApiError::bad_request("consumer credential requires 'id' field")
-    })?;
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("consumer credential requires 'id' field"))?;
     // 把 consumer_id 注入 payload，保证凭据与父消费者一致
     let mut payload = body.clone();
     payload["consumer_id"] = serde_json::Value::String(consumer_id);
@@ -555,10 +531,7 @@ async fn set_plugin_enabled(
     actor: &str,
 ) -> Result<StoredResource, ApiError> {
     // 先查当前 payload（包含 id 与其他字段，避免 PUT 覆盖其他属性）
-    let existing = state
-        .service
-        .get_resource(ResourceKind::Plugin, id)
-        .await?;
+    let existing = state.service.get_resource(ResourceKind::Plugin, id).await?;
     let mut payload = existing.payload.clone();
     payload["enabled"] = serde_json::Value::Bool(enabled);
     // 构造 ResourceUpdate，只更新 payload，同时带上乐观锁版本号
@@ -569,10 +542,7 @@ async fn set_plugin_enabled(
         expected_version: Some(existing.version),
     };
     // ? 自动触发 From<ControlError> for ApiError 转换，再用 Ok() 包成 Result
-    Ok(state
-        .service
-        .update_resource(ResourceKind::Plugin, id, update, actor)
-        .await?)
+    Ok(state.service.update_resource(ResourceKind::Plugin, id, update, actor).await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -587,10 +557,5 @@ fn parse_kind(kind: &str) -> Result<ResourceKind, ApiError> {
 
 /// 服务层分页结果 → API 分页响应。
 fn map_page<T, U>(page: Page<T>, f: impl Fn(T) -> U) -> PageView<U> {
-    PageView::new(
-        page.items.into_iter().map(f).collect(),
-        page.total,
-        page.limit,
-        page.offset,
-    )
+    PageView::new(page.items.into_iter().map(f).collect(), page.total, page.limit, page.offset)
 }

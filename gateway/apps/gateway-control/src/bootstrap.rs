@@ -39,9 +39,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             Arc::new(MemoryRepository::new())
         },
         (Some(_), true) => {
-            return Err(anyhow!(
-                "--database-url and --memory are mutually exclusive"
-            ))
+            return Err(anyhow!("--database-url and --memory are mutually exclusive"))
         },
         (None, false) => {
             return Err(anyhow!(
@@ -59,9 +57,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         auth.add_spec(spec, "viewer", Role::Viewer);
     }
     if !auth.is_configured() {
-        return Err(anyhow!(
-            "at least one admin token is required (GATEWAY_ADMIN_TOKENS)"
-        ));
+        return Err(anyhow!("at least one admin token is required (GATEWAY_ADMIN_TOKENS)"));
     }
 
     // 4. 构建 Router 并启动

@@ -42,10 +42,7 @@ impl CompiledSnapshot {
     /// # 返回
     /// - `Ok(snapshot)`：校验通过
     /// - `Err(errors)`：所有校验错误（批量返回，便于控制面一次性展示）
-    pub fn compile(
-        bundle: ResourceBundle,
-        config_version: u64,
-    ) -> Result<Self, Vec<ConfigError>> {
+    pub fn compile(bundle: ResourceBundle, config_version: u64) -> Result<Self, Vec<ConfigError>> {
         let bundle = bundle.canonicalized();
         // 复用 Phase 1/2 的完整校验规则；失败时不得生成快照
         bundle.validate()?;
@@ -117,6 +114,7 @@ impl CompiledSnapshot {
         merged.routes = self.bundle.routes.clone();
         merged.services = self.bundle.services.clone();
         merged.upstreams = self.bundle.upstreams.clone();
+        merged.certificates = self.bundle.certificates.clone();
         merged.policies = self.bundle.policies.clone();
         merged
     }
@@ -203,7 +201,9 @@ mod tests {
                     region: None,
                 }],
                 discovery: None,
+                health_check: None,
             }],
+            certificates: vec![],
             policies: PoliciesConfig::default(),
         }
     }

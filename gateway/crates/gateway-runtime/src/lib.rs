@@ -24,10 +24,12 @@
 pub mod admin;
 pub mod body;
 pub mod discovery;
+pub mod health;
 pub mod mirror;
 pub mod pipeline;
 pub mod runtime;
 pub mod state;
+pub mod tls;
 
 pub use runtime::{Runtime, RuntimeHandle};
 pub use state::{RuntimeState, SnapshotApplyError, SnapshotStore, INITIAL_CONFIG_VERSION};

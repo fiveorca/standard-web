@@ -115,7 +115,9 @@ impl SyncClient {
             .into_inner();
 
         if !heartbeat.has_update {
-            return Ok(SyncOutcome::UpToDate { version: heartbeat.current_version });
+            return Ok(SyncOutcome::UpToDate {
+                version: heartbeat.current_version,
+            });
         }
         if heartbeat.current_version == 0 {
             return Ok(SyncOutcome::NoConfig);
@@ -124,7 +126,9 @@ impl SyncClient {
         // 2. 拉取快照
         let snapshot_response = self
             .client
-            .fetch_snapshot(FetchSnapshotRequest { instance_id: self.instance_id.clone() })
+            .fetch_snapshot(FetchSnapshotRequest {
+                instance_id: self.instance_id.clone(),
+            })
             .await
             .map_err(|e| format!("fetch snapshot failed: {}", e.message()))?
             .into_inner();
@@ -134,25 +138,27 @@ impl SyncClient {
         }
 
         // 3. 反序列化 + checksum 校验
-        let snapshot: CompiledSnapshot =
-            match serde_json::from_str(&snapshot_response.payload_json) {
-                Ok(snapshot) => snapshot,
-                Err(e) => {
-                    let message = format!("invalid snapshot payload: {e}");
-                    self.report(snapshot_response.version, false, &message).await;
-                    return Ok(SyncOutcome::Rejected {
-                        version: snapshot_response.version,
-                        message,
-                    });
-                },
-            };
+        let snapshot: CompiledSnapshot = match serde_json::from_str(&snapshot_response.payload_json)
+        {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                let message = format!("invalid snapshot payload: {e}");
+                self.report(snapshot_response.version, false, &message).await;
+                return Ok(SyncOutcome::Rejected {
+                    version: snapshot_response.version,
+                    message,
+                });
+            },
+        };
 
-        if !snapshot_response.checksum.is_empty()
-            && snapshot.checksum != snapshot_response.checksum
+        if !snapshot_response.checksum.is_empty() && snapshot.checksum != snapshot_response.checksum
         {
             let message = "snapshot checksum mismatch".to_string();
             self.report(snapshot_response.version, false, &message).await;
-            return Ok(SyncOutcome::Rejected { version: snapshot_response.version, message });
+            return Ok(SyncOutcome::Rejected {
+                version: snapshot_response.version,
+                message,
+            });
         }
 
         // 4. 应用（数据面原子替换运行时快照）

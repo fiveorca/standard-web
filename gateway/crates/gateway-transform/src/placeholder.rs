@@ -48,9 +48,7 @@ impl PlaceholderEnv {
     ///
     /// 这是唯一一个与 PluginContext 交互的点；之后 `apply` / `render`
     /// 都只依赖 `&PlaceholderEnv`，借用冲突的边界得以清晰。
-    pub fn from_plugin_ctx(
-        ctx: &gateway_plugin::PluginContext<'_>,
-    ) -> Self {
+    pub fn from_plugin_ctx(ctx: &gateway_plugin::PluginContext<'_>) -> Self {
         Self {
             request_id: ctx.request_id().to_string(),
             client_ip: ctx.client_ip(),
@@ -130,10 +128,7 @@ fn lookup(key: &str, env: &PlaceholderEnv) -> Option<String> {
             if let Some(host) = env.uri.host() {
                 Some(host.to_string())
             } else {
-                env.request_headers
-                    .get(HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
+                env.request_headers.get(HOST).and_then(|v| v.to_str().ok()).map(str::to_string)
             }
         },
         // `${header:name}` —— 冒号分隔
@@ -141,10 +136,7 @@ fn lookup(key: &str, env: &PlaceholderEnv) -> Option<String> {
             let header_name = rest.trim_start_matches("header:");
             // HeaderName::from_bytes 会拒绝非法字符
             let name = HeaderName::from_bytes(header_name.as_bytes()).ok()?;
-            env.request_headers
-                .get(&name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
+            env.request_headers.get(&name).and_then(|v| v.to_str().ok()).map(str::to_string)
         },
         // 未知 key：返回 None（占位符原样保留）
         _ => None,
@@ -205,10 +197,8 @@ mod tests {
     #[test]
     fn header_placeholder() {
         let mut env = make_env();
-        env.request_headers.insert(
-            HeaderName::from_static("x-user-id"),
-            http::HeaderValue::from_static("alice"),
-        );
+        env.request_headers
+            .insert(HeaderName::from_static("x-user-id"), http::HeaderValue::from_static("alice"));
 
         assert_eq!(render("user=${header:x-user-id}", &env), "user=alice");
         // Header 不存在 → 原样保留

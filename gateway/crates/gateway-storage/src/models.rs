@@ -231,7 +231,10 @@ impl StoredResource {
     ///
     /// 数据库中的 JSON 可能因为历史迁移或人工修改而不符合当前 schema，
     /// 因此这里必须返回错误而不是 panic。
-    pub fn decode<T: serde::de::DeserializeOwned>(&self, kind: ResourceKind) -> Result<T, StorageError> {
+    pub fn decode<T: serde::de::DeserializeOwned>(
+        &self,
+        kind: ResourceKind,
+    ) -> Result<T, StorageError> {
         serde_json::from_value(self.payload.clone()).map_err(|e| {
             StorageError::invalid_payload(format!(
                 "failed to decode {}/{}: {e}",

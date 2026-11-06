@@ -11,10 +11,12 @@
 //!
 //! - 本 crate 不实现业务逻辑（不路由、不转发），业务逻辑在 Runtime 组合根
 //! - 业务逻辑通过 `tower::Service` 注入，Network 层只负责 IO
-//! - Phase 1 只支持 HTTP；HTTPS（Rustls）是 P1
+//! - 支持明文 HTTP 与 TLS（HTTPS）接入，TLS 实现见 [`tls`]
 
 #![allow(clippy::needless_doctest_main)]
 
 pub mod server;
+pub mod tls;
 
 pub use server::{HttpServer, ServerOptions};
+pub use tls::{LoadedCertificate, TlsRuntime};

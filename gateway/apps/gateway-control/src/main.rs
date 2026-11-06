@@ -11,10 +11,7 @@ fn main() {
     let cli = cli::Cli::parse_args();
 
     // 构建多线程 Tokio Runtime（与数据面保持一致）
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(err) => {
             eprintln!("failed to build tokio runtime: {err}");

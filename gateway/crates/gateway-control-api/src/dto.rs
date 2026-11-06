@@ -7,9 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use gateway_control_service::PublishOutcome;
-use gateway_storage::{
-    AuditLogEntry, ConfigVersionRecord, PublishRecord, StoredResource,
-};
+use gateway_storage::{AuditLogEntry, ConfigVersionRecord, PublishRecord, StoredResource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

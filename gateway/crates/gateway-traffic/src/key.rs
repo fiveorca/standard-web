@@ -29,10 +29,7 @@ use gateway_plugin::PluginContext;
 pub fn resolve_key(spec: &RateLimitKeySpec, ctx: &PluginContext<'_>) -> Option<String> {
     match spec.kind {
         // 客户端 IP：直接取 SocketAddr 的 ip 部分
-        RateLimitKeyKind::ClientIp => ctx
-            .ctx
-            .client_ip
-            .map(|addr| addr.ip().to_string()),
+        RateLimitKeyKind::ClientIp => ctx.ctx.client_ip.map(|addr| addr.ip().to_string()),
 
         // 全局：固定字符串
         RateLimitKeyKind::Global => Some("global".into()),
@@ -42,9 +39,7 @@ pub fn resolve_key(spec: &RateLimitKeySpec, ctx: &PluginContext<'_>) -> Option<S
             let header_name = spec.header.as_deref()?;
             // HeaderName 已在策略编译期校验过，这里直接解析
             let name = http::HeaderName::from_bytes(header_name.as_bytes()).ok()?;
-            ctx.header(&name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
+            ctx.header(&name).and_then(|v| v.to_str().ok()).map(str::to_string)
         },
 
         // Route：取路由 ID
@@ -71,11 +66,7 @@ mod tests {
         // `SocketAddr` 必须带端口；这里固定 80 端口，只关心 ip() 部分
         let addr: SocketAddr = format!("{ip}:80").parse().expect("valid addr");
         request_ctx.client_ip = Some(addr);
-        let (parts, _) = http::Request::builder()
-            .uri("/")
-            .body(())
-            .expect("request")
-            .into_parts();
+        let (parts, _) = http::Request::builder().uri("/").body(()).expect("request").into_parts();
         (parts, request_ctx)
     }
 

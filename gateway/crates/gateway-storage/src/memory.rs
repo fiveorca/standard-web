@@ -240,12 +240,8 @@ impl GatewayRepository for MemoryRepository {
         let mut state = self.state.write().await;
 
         // 版本号单调递增：取当前最大版本 + 1
-        let next_version = state
-            .versions
-            .keys()
-            .next_back()
-            .map(|v| v.saturating_add(1))
-            .unwrap_or(1);
+        let next_version =
+            state.versions.keys().next_back().map(|v| v.saturating_add(1)).unwrap_or(1);
 
         // 旧版本标记为 superseded（仍保留，供回滚与审计）
         for record in state.versions.values_mut() {
@@ -278,10 +274,7 @@ impl GatewayRepository for MemoryRepository {
         Ok(state.versions.values().next_back().cloned())
     }
 
-    async fn get_version(
-        &self,
-        version: u64,
-    ) -> Result<Option<ConfigVersionRecord>, StorageError> {
+    async fn get_version(&self, version: u64) -> Result<Option<ConfigVersionRecord>, StorageError> {
         let state = self.state.read().await;
         Ok(state.versions.get(&version).cloned())
     }
@@ -292,14 +285,7 @@ impl GatewayRepository for MemoryRepository {
         offset: usize,
     ) -> Result<Vec<ConfigVersionRecord>, StorageError> {
         let state = self.state.read().await;
-        let items = state
-            .versions
-            .values()
-            .rev()
-            .skip(offset)
-            .take(limit)
-            .cloned()
-            .collect();
+        let items = state.versions.values().rev().skip(offset).take(limit).cloned().collect();
         Ok(items)
     }
 
@@ -348,10 +334,7 @@ mod tests {
     #[tokio::test]
     async fn crud_roundtrip() {
         let repo = MemoryRepository::new();
-        let created = repo
-            .create_resource(ResourceKind::Route, draft("r1"))
-            .await
-            .expect("create");
+        let created = repo.create_resource(ResourceKind::Route, draft("r1")).await.expect("create");
         assert_eq!(created.version, 1);
 
         // 重复创建 → 冲突
@@ -395,32 +378,18 @@ mod tests {
             .expect_err("stale version");
         assert!(matches!(err, StorageError::VersionConflict { .. }));
 
-        repo.delete_resource(ResourceKind::Route, "r1", None)
-            .await
-            .expect("delete");
-        assert!(repo
-            .get_resource(ResourceKind::Route, "r1")
-            .await
-            .expect("get")
-            .is_none());
+        repo.delete_resource(ResourceKind::Route, "r1", None).await.expect("delete");
+        assert!(repo.get_resource(ResourceKind::Route, "r1").await.expect("get").is_none());
     }
 
     #[tokio::test]
     async fn pagination_and_count() {
         let repo = MemoryRepository::new();
         for id in ["a", "b", "c"] {
-            repo.create_resource(ResourceKind::Service, draft(id))
-                .await
-                .expect("create");
+            repo.create_resource(ResourceKind::Service, draft(id)).await.expect("create");
         }
-        assert_eq!(
-            repo.count_resources(ResourceKind::Service).await.expect("count"),
-            3
-        );
-        let page = repo
-            .list_resources(ResourceKind::Service, 1, 1)
-            .await
-            .expect("list");
+        assert_eq!(repo.count_resources(ResourceKind::Service).await.expect("count"), 3);
+        let page = repo.list_resources(ResourceKind::Service, 1, 1).await.expect("list");
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, "b");
     }
@@ -486,10 +455,7 @@ mod tests {
             .expect("record");
         }
 
-        let filtered = repo
-            .list_publish_records(Some(2), 10, 0)
-            .await
-            .expect("list");
+        let filtered = repo.list_publish_records(Some(2), 10, 0).await.expect("list");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].status, PublishStatus::Failed);
     }

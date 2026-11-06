@@ -25,9 +25,9 @@
 //! 资源集合装配成 [`GatewayConfig`]，再调用同一入口。
 
 use gateway_core::{
-    AuthPolicyConfig, CircuitBreakerPolicyConfig, CorsPolicyConfig, EndpointConfig,
-    RateLimitPolicyConfig, RetryPolicyConfig, RouteConfig, ServiceConfig, TimeoutPolicyConfig,
-    TransformPolicyConfig, UpstreamConfig,
+    AuthPolicyConfig, CertificateConfig, CircuitBreakerPolicyConfig, CorsPolicyConfig,
+    EndpointConfig, RateLimitPolicyConfig, RetryPolicyConfig, RouteConfig, ServiceConfig,
+    TimeoutPolicyConfig, TransformPolicyConfig, UpstreamConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,9 @@ pub struct ResourceBundle {
     /// 上游
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
+    /// TLS 证书（Phase 7：随配置版本下发，支持 HTTPS 热更新与 SNI）
+    #[serde(default)]
+    pub certificates: Vec<CertificateConfig>,
     /// 治理策略
     #[serde(default)]
     pub policies: PoliciesConfig,
@@ -65,6 +68,7 @@ impl ResourceBundle {
             routes: cfg.routes.clone(),
             services: cfg.services.clone(),
             upstreams: cfg.upstreams.clone(),
+            certificates: cfg.certificates.clone(),
             policies: cfg.policies.clone(),
         }
     }
@@ -78,6 +82,7 @@ impl ResourceBundle {
         self.routes.sort_by(|a, b| a.id.cmp(&b.id));
         self.services.sort_by(|a, b| a.id.cmp(&b.id));
         self.upstreams.sort_by(|a, b| a.id.cmp(&b.id));
+        self.certificates.sort_by(|a, b| a.id.cmp(&b.id));
 
         // 端点顺序影响 Round-Robin 的起点，这里按地址排序保证确定性
         for upstream in &mut self.upstreams {
@@ -113,6 +118,7 @@ impl ResourceBundle {
             upstreams: self.upstreams.clone(),
             services: self.services.clone(),
             routes: self.routes.clone(),
+            certificates: self.certificates.clone(),
             policies: self.policies.clone(),
         }
     }
@@ -155,11 +161,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 ///
 /// 不直接实现 `Ord`，避免影响 gateway-core 的领域模型。
 fn endpoint_key(endpoint: &EndpointConfig) -> (String, u16, String) {
-    (
-        endpoint.host.clone(),
-        endpoint.port,
-        endpoint.id.clone().unwrap_or_default(),
-    )
+    (endpoint.host.clone(), endpoint.port, endpoint.id.clone().unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +194,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use gateway_core::{PathType, LoadBalanceAlgorithm};
+    use gateway_core::{LoadBalanceAlgorithm, PathType};
 
     fn service(id: &str) -> ServiceConfig {
         ServiceConfig {
@@ -222,6 +224,7 @@ mod tests {
                 region: None,
             }],
             discovery: None,
+            health_check: None,
         }
     }
 
@@ -263,6 +266,7 @@ mod tests {
             routes: vec![route("r-2", "svc-1"), route("r-1", "svc-1")],
             services: vec![service("svc-1")],
             upstreams: vec![upstream("up-1")],
+            certificates: vec![],
             policies: PoliciesConfig::default(),
         };
         let checksum_a = a.checksum().expect("checksum");
@@ -278,6 +282,7 @@ mod tests {
             routes: vec![route("r-1", "missing-svc")],
             services: vec![service("svc-1")],
             upstreams: vec![upstream("up-1")],
+            certificates: vec![],
             policies: PoliciesConfig::default(),
         };
         let errors = bundle.validate().expect_err("must fail");
@@ -290,6 +295,7 @@ mod tests {
             routes: vec![route("r-1", "svc-1")],
             services: vec![service("svc-1")],
             upstreams: vec![upstream("up-1")],
+            certificates: vec![],
             policies: PoliciesConfig::default(),
         };
         bundle.validate().expect("valid");

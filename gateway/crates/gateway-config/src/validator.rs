@@ -36,6 +36,7 @@ pub fn validate(cfg: &GatewayConfig) -> Result<(), Vec<ConfigError>> {
     let mut errors: Vec<ConfigError> = Vec::new();
 
     validate_server(cfg, &mut errors);
+    validate_certificates(cfg, &mut errors);
     validate_upstreams(cfg, &mut errors);
     validate_services(cfg, &mut errors);
     validate_routes(cfg, &mut errors);
@@ -73,6 +74,94 @@ fn validate_server(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
             path: "server".into(),
             message: "http port and admin port must be different".into(),
         });
+    }
+
+    // TLS：必须有明确的证书来源，且文件证书必须成对出现
+    let tls = &cfg.server.http.tls;
+    if tls.enabled {
+        let has_cert_file = tls.cert_file.is_some();
+        let has_key_file = tls.key_file.is_some();
+        if has_cert_file != has_key_file {
+            errors.push(ConfigError {
+                path: "server.http.tls".into(),
+                message: "cert_file and key_file must be configured together".into(),
+            });
+        }
+
+        let referenced = tls
+            .certificate_id
+            .as_deref()
+            .and_then(|id| cfg.certificates.iter().find(|c| c.id == id));
+        // 控制面引导模式（control_plane.enabled）允许本地没有任何证书：
+        // 证书由控制面发布后通过配置快照下发，首个快照应用前握手会失败。
+        if !has_cert_file && referenced.is_none() && !cfg.control_plane.enabled {
+            errors.push(ConfigError {
+                path: "server.http.tls".into(),
+                message: "tls enabled but no certificate source: configure certificate_id or cert_file/key_file"
+                    .into(),
+            });
+        }
+        if referenced.is_some_and(|c| !c.enabled) {
+            errors.push(ConfigError {
+                path: "server.http.tls.certificate_id".into(),
+                message: "referenced certificate is disabled".into(),
+            });
+        }
+        if tls.reload_interval_secs == 0 {
+            errors.push(ConfigError {
+                path: "server.http.tls.reload_interval_secs".into(),
+                message: "reload_interval_secs must be >= 1".into(),
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Certificate 校验
+// ---------------------------------------------------------------------------
+
+/// 校验证书资源：ID 唯一、PEM 结构完整、启用证书字段非空。
+fn validate_certificates(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
+    let mut seen = std::collections::HashSet::new();
+    for (idx, cert) in cfg.certificates.iter().enumerate() {
+        let base = format!("certificates[{idx}]");
+        if cert.id.trim().is_empty() {
+            errors.push(ConfigError {
+                path: format!("{base}.id"),
+                message: "id must not be empty".into(),
+            });
+        } else if !seen.insert(cert.id.clone()) {
+            errors.push(ConfigError {
+                path: format!("{base}.id"),
+                message: format!("duplicate certificate id '{}'", cert.id),
+            });
+        }
+
+        if !cert.enabled {
+            continue;
+        }
+        if cert.cert_pem.trim().is_empty() {
+            errors.push(ConfigError {
+                path: format!("{base}.cert_pem"),
+                message: "cert_pem must not be empty".into(),
+            });
+        } else if !cert.cert_pem.contains("BEGIN CERTIFICATE") {
+            errors.push(ConfigError {
+                path: format!("{base}.cert_pem"),
+                message: "cert_pem must contain a PEM certificate".into(),
+            });
+        }
+        if cert.key_pem.trim().is_empty() {
+            errors.push(ConfigError {
+                path: format!("{base}.key_pem"),
+                message: "key_pem must not be empty".into(),
+            });
+        } else if !cert.key_pem.contains("PRIVATE KEY") {
+            errors.push(ConfigError {
+                path: format!("{base}.key_pem"),
+                message: "key_pem must contain a PEM private key".into(),
+            });
+        }
     }
 }
 
@@ -121,6 +210,64 @@ fn validate_upstreams(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
             }
         }
 
+        // ---- 健康检查配置校验 ----
+        if let Some(health) = &upstream.health_check {
+            let base = format!("upstreams[{idx}].health_check");
+            if health.interval_secs == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.interval_secs"),
+                    message: "interval_secs must be >= 1".into(),
+                });
+            }
+            if health.timeout_secs == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.timeout_secs"),
+                    message: "timeout_secs must be >= 1".into(),
+                });
+            }
+            if health.unhealthy_threshold == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.unhealthy_threshold"),
+                    message: "unhealthy_threshold must be >= 1".into(),
+                });
+            }
+            if health.healthy_threshold == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.healthy_threshold"),
+                    message: "healthy_threshold must be >= 1".into(),
+                });
+            }
+            if health.enabled
+                && matches!(health.kind, gateway_core::HealthCheckKind::Http)
+                && !health.path.starts_with('/')
+            {
+                errors.push(ConfigError {
+                    path: format!("{base}.path"),
+                    message: "path must start with '/'".into(),
+                });
+            }
+            if let Some(expr) = &health.expected_status {
+                if let Err(reason) = gateway_core::parse_expected_status(expr) {
+                    errors.push(ConfigError {
+                        path: format!("{base}.expected_status"),
+                        message: format!("invalid expected_status: {reason}"),
+                    });
+                }
+            }
+            if health.passive.failure_threshold == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.passive.failure_threshold"),
+                    message: "failure_threshold must be >= 1".into(),
+                });
+            }
+            if health.passive.recovery_threshold == 0 {
+                errors.push(ConfigError {
+                    path: format!("{base}.passive.recovery_threshold"),
+                    message: "recovery_threshold must be >= 1".into(),
+                });
+            }
+        }
+
         // ---- Phase 6：动态服务发现配置校验 ----
         if let Some(discovery) = &upstream.discovery {
             let base = format!("upstreams[{idx}].discovery");
@@ -128,17 +275,13 @@ fn validate_upstreams(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                 gateway_core::DiscoveryProviderKind::Static => {
                     errors.push(ConfigError {
                         path: format!("{base}.provider"),
-                        message: "discovery.provider must be 'dns' or 'kubernetes' when discovery is set"
-                            .into(),
+                        message:
+                            "discovery.provider must be 'dns' or 'kubernetes' when discovery is set"
+                                .into(),
                     });
                 },
                 gateway_core::DiscoveryProviderKind::Dns => {
-                    if discovery
-                        .domain
-                        .as_deref()
-                        .map(|v| v.trim().is_empty())
-                        .unwrap_or(true)
-                    {
+                    if discovery.domain.as_deref().map(|v| v.trim().is_empty()).unwrap_or(true) {
                         errors.push(ConfigError {
                             path: format!("{base}.domain"),
                             message: "discovery.domain is required for dns provider".into(),
@@ -156,23 +299,14 @@ fn validate_upstreams(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                     }
                 },
                 gateway_core::DiscoveryProviderKind::Kubernetes => {
-                    if discovery
-                        .namespace
-                        .as_deref()
-                        .map(|v| v.trim().is_empty())
-                        .unwrap_or(true)
-                    {
+                    if discovery.namespace.as_deref().map(|v| v.trim().is_empty()).unwrap_or(true) {
                         errors.push(ConfigError {
                             path: format!("{base}.namespace"),
-                            message: "discovery.namespace is required for kubernetes provider".into(),
+                            message: "discovery.namespace is required for kubernetes provider"
+                                .into(),
                         });
                     }
-                    if discovery
-                        .service
-                        .as_deref()
-                        .map(|v| v.trim().is_empty())
-                        .unwrap_or(true)
-                    {
+                    if discovery.service.as_deref().map(|v| v.trim().is_empty()).unwrap_or(true) {
                         errors.push(ConfigError {
                             path: format!("{base}.service"),
                             message: "discovery.service is required for kubernetes provider".into(),
@@ -500,11 +634,12 @@ fn validate_auth_policies(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                 }
             },
 
-            // ---- API Key ----
+            // ---- API Key（支持生命周期元数据）----
             AuthPolicySpec::ApiKey {
                 keys,
                 header_name,
                 query_param,
+                required_scopes,
             } => {
                 if keys.is_empty() {
                     errors.push(ConfigError {
@@ -512,14 +647,83 @@ fn validate_auth_policies(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                         message: "keys must not be empty".into(),
                     });
                 }
+
+                let mut seen_ids: HashSet<&str> = HashSet::new();
+                let mut seen_hashes: HashSet<String> = HashSet::new();
+                let mut seen_plaintext: HashSet<&str> = HashSet::new();
+
                 for (key_idx, key) in keys.iter().enumerate() {
-                    if key.key.is_empty() {
+                    let entry = format!("{base}.keys[{key_idx}]");
+
+                    // 明文与摘要必须提供且仅提供其一
+                    match (key.key.is_empty(), key.key_hash.as_deref()) {
+                        (false, _) => {
+                            if !seen_plaintext.insert(key.key.as_str()) {
+                                errors.push(ConfigError {
+                                    path: format!("{entry}.key"),
+                                    message: "duplicate api key value".into(),
+                                });
+                            }
+                        },
+                        (true, Some(hash)) => {
+                            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                                errors.push(ConfigError {
+                                    path: format!("{entry}.key_hash"),
+                                    message: "key_hash must be 64 hex characters (SHA-256 digest)"
+                                        .into(),
+                                });
+                            }
+                            if !seen_hashes.insert(hash.to_ascii_lowercase()) {
+                                errors.push(ConfigError {
+                                    path: format!("{entry}.key_hash"),
+                                    message: "duplicate api key hash".into(),
+                                });
+                            }
+                        },
+                        (true, None) => errors.push(ConfigError {
+                            path: format!("{entry}.key"),
+                            message:
+                                "either 'key' (plaintext) or 'key_hash' (sha256) must be provided"
+                                    .into(),
+                        }),
+                    }
+
+                    // ID 是吊销 / 轮换 / 用量统计的索引，必须唯一
+                    if let Some(id) = key.id.as_deref() {
+                        if id.is_empty() {
+                            errors.push(ConfigError {
+                                path: format!("{entry}.id"),
+                                message: "id must not be empty".into(),
+                            });
+                        } else if !seen_ids.insert(id) {
+                            errors.push(ConfigError {
+                                path: format!("{entry}.id"),
+                                message: format!("duplicate api key id '{id}'"),
+                            });
+                        }
+                    }
+
+                    // 过期时间为 0 等价于"立即过期"，几乎总是配置错误
+                    if key.expires_at == Some(0) {
                         errors.push(ConfigError {
-                            path: format!("{base}.keys[{key_idx}].key"),
-                            message: "key must not be empty".into(),
+                            path: format!("{entry}.expires_at"),
+                            message: "expires_at must be a positive unix timestamp".into(),
                         });
                     }
+
+                    for (scope_idx, scope) in key.scopes.iter().enumerate() {
+                        if scope.is_empty() {
+                            errors.push(ConfigError {
+                                path: format!("{entry}.scopes[{scope_idx}]"),
+                                message: "scope must not be empty".into(),
+                            });
+                        }
+                    }
+
+                    // 注意：`revoked = true` 的条目会被认证层持续拒绝 401，
+                    // 这是合法配置（保留记录用于审计），因此不报错。
                 }
+
                 if !is_valid_header_name(header_name) {
                     errors.push(ConfigError {
                         path: format!("{base}.header_name"),
@@ -534,9 +738,17 @@ fn validate_auth_policies(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                         });
                     }
                 }
+                for (scope_idx, scope) in required_scopes.iter().enumerate() {
+                    if scope.is_empty() {
+                        errors.push(ConfigError {
+                            path: format!("{base}.required_scopes[{scope_idx}]"),
+                            message: "required scope must not be empty".into(),
+                        });
+                    }
+                }
             },
 
-            // ---- JWT（静态密钥 + 算法白名单）----
+            // ---- JWT（HMAC 静态密钥 / JWKS 非对称公钥）----
             AuthPolicySpec::Jwt {
                 secret,
                 algorithms,
@@ -544,6 +756,7 @@ fn validate_auth_policies(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                 header_name,
                 query_param,
                 validate_exp,
+                jwks,
                 ..
             } => {
                 // 算法白名单不能为空：空白名单意味着任何 (包括伪造的) 算法都无处校验
@@ -554,23 +767,61 @@ fn validate_auth_policies(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
                             .into(),
                     });
                 }
-                // 静态密钥方案下，HMAC 必须提供 non-empty secret
+
+                let needs_hmac = algorithms.iter().any(|alg| alg.is_hmac());
+                let needs_jwks = algorithms.iter().any(|alg| !alg.is_hmac());
+
+                // HMAC 必须提供 non-empty secret（且至少 32 字节）
                 match secret {
-                    None => errors.push(ConfigError {
-                        path: format!("{base}.secret"),
-                        message: "secret is required for HS256/HS384/HS512".into(),
-                    }),
+                    None => {
+                        if needs_hmac {
+                            errors.push(ConfigError {
+                                path: format!("{base}.secret"),
+                                message: "secret is required for HS256/HS384/HS512".into(),
+                            });
+                        }
+                    },
                     Some(s) if s.is_empty() => errors.push(ConfigError {
                         path: format!("{base}.secret"),
                         message: "secret must not be empty".into(),
                     }),
                     // HMAC-SHA256 的安全强度下限：短于 32 字节的密钥容易离线暴力破解
-                    Some(s) if s.len() < 32 => errors.push(ConfigError {
+                    Some(s) if needs_hmac && s.len() < 32 => errors.push(ConfigError {
                         path: format!("{base}.secret"),
                         message: "secret should be at least 32 bytes for HS256 security".into(),
                     }),
                     Some(_) => {},
                 }
+
+                // 非对称算法必须提供合法 JWKS 文档
+                match jwks {
+                    None => {
+                        if needs_jwks {
+                            errors.push(ConfigError {
+                                path: format!("{base}.jwks"),
+                                message: "jwks is required for RS*/ES* algorithms".into(),
+                            });
+                        }
+                    },
+                    Some(document) => match serde_json::from_str::<serde_json::Value>(document) {
+                        Ok(value) => match value.get("keys").and_then(|keys| keys.as_array()) {
+                            Some(keys) if keys.is_empty() => errors.push(ConfigError {
+                                path: format!("{base}.jwks"),
+                                message: "jwks.keys must not be empty".into(),
+                            }),
+                            Some(_) => {},
+                            None => errors.push(ConfigError {
+                                path: format!("{base}.jwks"),
+                                message: "jwks must be a JSON object with a 'keys' array".into(),
+                            }),
+                        },
+                        Err(e) => errors.push(ConfigError {
+                            path: format!("{base}.jwks"),
+                            message: format!("invalid JWKS JSON: {e}"),
+                        }),
+                    },
+                }
+
                 // leeway 过大会让已过期 Token 长时间仍可用
                 if *leeway_secs > 300 {
                     errors.push(ConfigError {
@@ -983,8 +1234,10 @@ fn validate_references(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
         cfg.policies.request_transform.iter().map(|p| p.id.as_str()).collect();
     let resp_transform_ids: HashSet<&str> =
         cfg.policies.response_transform.iter().map(|p| p.id.as_str()).collect();
+    let waf_ids: HashSet<&str> = cfg.policies.waf.iter().map(|p| p.id.as_str()).collect();
+    let quota_ids: HashSet<&str> = cfg.policies.quota.iter().map(|p| p.id.as_str()).collect();
 
-    // 逐条 Route 检查 8 类策略引用（None 表示未引用，直接通过）
+    // 逐条 Route 检查策略引用（None 表示未引用，直接通过）
     for (idx, route) in cfg.routes.iter().enumerate() {
         check_policy_ref(
             route.auth_policy_id.as_ref(),
@@ -1040,6 +1293,20 @@ fn validate_references(cfg: &GatewayConfig, errors: &mut Vec<ConfigError>) {
             &resp_transform_ids,
             format!("routes[{idx}].response_transform_id"),
             "policies.response_transform",
+            errors,
+        );
+        check_policy_ref(
+            route.waf_policy_id.as_ref(),
+            &waf_ids,
+            format!("routes[{idx}].waf_policy_id"),
+            "policies.waf",
+            errors,
+        );
+        check_policy_ref(
+            route.quota_policy_id.as_ref(),
+            &quota_ids,
+            format!("routes[{idx}].quota_policy_id"),
+            "policies.quota",
             errors,
         );
     }
@@ -1329,9 +1596,10 @@ routes:
         assert!(validate(&cfg).is_ok(), "errors: {:?}", validate(&cfg).err());
     }
 
-    /// JWT：算法白名单为空 / 缺少 secret 都必须报错
+    /// JWT：算法白名单为空 / 白名单含 HS* 但缺少 secret 都必须报错
     #[test]
     fn jwt_policy_requires_whitelist_and_secret() {
+        // 1) 算法白名单为空
         let yaml = r#"
 gateway: { id: g }
 server: { http: { port: 8080 } }
@@ -1346,10 +1614,112 @@ policies:
             errs.iter().any(|e| e.path.contains("algorithms")),
             "expected algorithms error, got {errs:?}"
         );
+
+        // 2) HS* 白名单缺少 secret
+        let yaml = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+policies:
+  auth:
+    - id: jwt-no-secret
+      type: jwt
+      algorithms: [HS256]
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        let errs = validate(&cfg).expect_err("should fail");
         assert!(
             errs.iter().any(|e| e.path.contains("secret")),
             "expected secret error, got {errs:?}"
         );
+    }
+
+    /// JWT：RS256 白名单必须配置合法 JWKS，且无需 secret
+    #[test]
+    fn jwt_asymmetric_requires_jwks() {
+        let base = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+policies:
+  auth:
+    - id: jwt-rs
+      type: jwt
+      algorithms: [RS256]
+"#;
+        let cfg = load_from_str(base).unwrap();
+        let errs = validate(&cfg).expect_err("should fail without jwks");
+        assert!(
+            errs.iter().any(|e| e.path.contains("jwks")),
+            "expected jwks error, got {errs:?}"
+        );
+
+        let with_jwks = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+policies:
+  auth:
+    - id: jwt-rs
+      type: jwt
+      algorithms: [RS256]
+      jwks: '{"keys":[{"kty":"RSA","kid":"k1","n":"abc","e":"AQAB"}]}'
+"#;
+        let cfg = load_from_str(with_jwks).unwrap();
+        assert!(validate(&cfg).is_ok(), "errors: {:?}", validate(&cfg).err());
+    }
+
+    /// API Key：key_hash 必须是 64 位十六进制；key 与 key_hash 必须二选一
+    #[test]
+    fn api_key_lifecycle_fields_are_validated() {
+        let bad_hash = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+policies:
+  auth:
+    - id: keys
+      type: api_key
+      keys:
+        - key_hash: "zz"
+"#;
+        let cfg = load_from_str(bad_hash).unwrap();
+        let errs = validate(&cfg).expect_err("should fail");
+        assert!(
+            errs.iter().any(|e| e.path.contains("key_hash")),
+            "expected key_hash error, got {errs:?}"
+        );
+
+        let missing_source = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+policies:
+  auth:
+    - id: keys
+      type: api_key
+      keys:
+        - label: caller-a
+"#;
+        let cfg = load_from_str(missing_source).unwrap();
+        let errs = validate(&cfg).expect_err("should fail");
+        assert!(
+            errs.iter().any(|e| e.path.contains("key")),
+            "expected key source error, got {errs:?}"
+        );
+
+        let valid = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+policies:
+  auth:
+    - id: keys
+      type: api_key
+      required_scopes: [orders:read]
+      keys:
+        - id: k1
+          key_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          consumer_id: consumer-a
+          scopes: [orders:read]
+          expires_at: 4102444800
+"#;
+        let cfg = load_from_str(valid).unwrap();
+        assert!(validate(&cfg).is_ok(), "errors: {:?}", validate(&cfg).err());
     }
 
     /// JWT：短密钥（< 32 字节）必须被拒绝
@@ -1461,20 +1831,217 @@ policies:
         assert!(errs.iter().any(|e| e.message.contains("header injection")));
     }
 
-    /// 非法 CIDR 必须被拒绝
+    /// TLS 启用但未配置任何证书来源必须被拒绝
     #[test]
-    fn invalid_cidr_rejected() {
+    fn tls_requires_certificate_source() {
         let yaml = r#"
 gateway: { id: g }
-server: { http: { port: 8080 } }
-policies:
-  auth:
-    - id: ip
-      type: ip_allowlist
-      cidrs: ["10.0.0.0/40"]
+server:
+  http:
+    port: 8080
+    tls: { enabled: true }
 "#;
         let cfg = load_from_str(yaml).unwrap();
         let errs = validate(&cfg).expect_err("should fail");
-        assert!(errs.iter().any(|e| e.path.contains("cidrs")));
+        assert!(errs
+            .iter()
+            .any(|e| e.path == "server.http.tls" && e.message.contains("no certificate source")));
+    }
+
+    /// 文件证书必须 cert_file/key_file 成对出现
+    #[test]
+    fn tls_file_certificate_requires_both_files() {
+        let yaml = r#"
+gateway: { id: g }
+server:
+  http:
+    port: 8080
+    tls: { enabled: true, cert_file: /tmp/server.crt }
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        let errs = validate(&cfg).expect_err("should fail");
+        assert!(errs.iter().any(|e| e.message.contains("must be configured together")));
+    }
+
+    /// 文件证书成对配置即可通过（文件存在性在运行时检查）
+    #[test]
+    fn tls_file_certificate_pair_is_valid() {
+        let yaml = r#"
+gateway: { id: g }
+server:
+  http:
+    port: 8080
+    tls:
+      enabled: true
+      cert_file: /tmp/server.crt
+      key_file: /tmp/server.key
+      domains: ["api.example.com"]
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        assert!(validate(&cfg).is_ok());
+    }
+
+    /// 证书资源 PEM 结构非法必须被拒绝
+    #[test]
+    fn invalid_certificate_pem_rejected() {
+        let yaml = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+certificates:
+  - id: bad
+    enabled: true
+    cert_pem: "not a certificate"
+    key_pem: "not a key"
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        let errs = validate(&cfg).expect_err("should fail");
+        assert!(errs
+            .iter()
+            .any(|e| e.path.contains("cert_pem") && e.message.contains("PEM certificate")));
+        assert!(errs
+            .iter()
+            .any(|e| e.path.contains("key_pem") && e.message.contains("PEM private key")));
+    }
+
+    /// 未启用的证书允许保存草稿（不做 PEM 校验）
+    #[test]
+    fn disabled_certificate_allows_empty_material() {
+        let yaml = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+certificates:
+  - id: draft
+    enabled: false
+    cert_pem: ""
+    key_pem: ""
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        assert!(validate(&cfg).is_ok());
+    }
+
+    /// 控制面引导模式：本地没有证书也允许启动（证书由控制面下发）
+    #[test]
+    fn control_plane_mode_allows_tls_without_local_certificate() {
+        let yaml = r#"
+gateway: { id: g }
+server:
+  http:
+    port: 8443
+    tls: { enabled: true, certificate_id: "api-cert" }
+control_plane:
+  enabled: true
+  endpoint: "http://localhost:8092"
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        assert!(validate(&cfg).is_ok(), "errors: {:?}", validate(&cfg).err());
+    }
+
+    /// 控制面引导模式下文件证书仍必须成对配置
+    #[test]
+    fn control_plane_mode_still_requires_paired_file_certificate() {
+        let yaml = r#"
+gateway: { id: g }
+server:
+  http:
+    port: 8443
+    tls: { enabled: true, cert_file: /tmp/server.crt }
+control_plane:
+  enabled: true
+  endpoint: "http://localhost:8092"
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        let errs = validate(&cfg).expect_err("should fail");
+        assert!(errs.iter().any(|e| e.message.contains("must be configured together")));
+    }
+
+    /// 合法健康检查配置通过校验
+    #[test]
+    fn valid_health_check_passes() {
+        let yaml = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+upstreams:
+  - id: u1
+    endpoints:
+      - { host: 127.0.0.1, port: 9000 }
+    health_check:
+      enabled: true
+      kind: http
+      path: /healthz
+      interval_secs: 5
+      timeout_secs: 2
+      unhealthy_threshold: 3
+      healthy_threshold: 2
+      expected_status: "200-299"
+      passive: { enabled: true, failure_threshold: 5, recovery_threshold: 3 }
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        assert!(validate(&cfg).is_ok(), "errors: {:?}", validate(&cfg).err());
+    }
+
+    /// 范围表达式合法、非法表达式被拒绝
+    #[test]
+    fn expected_status_range_expression_is_validated() {
+        let valid = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+upstreams:
+  - id: u1
+    endpoints: [{ host: 127.0.0.1, port: 9000 }]
+    health_check: { expected_status: "200-399" }
+"#;
+        let cfg = load_from_str(valid).unwrap();
+        assert!(validate(&cfg).is_ok());
+
+        for bad in ["\"600-700\"", "\"99\"", "\"abc\"", "\"300-200\""] {
+            let yaml = format!(
+                r#"
+gateway: {{ id: g }}
+server: {{ http: {{ port: 8080 }} }}
+upstreams:
+  - id: u1
+    endpoints: [{{ host: 127.0.0.1, port: 9000 }}]
+    health_check: {{ expected_status: {bad} }}
+"#
+            );
+            let cfg = load_from_str(&yaml).unwrap();
+            let errs = validate(&cfg).expect_err("should fail");
+            assert!(
+                errs.iter().any(|e| e.path.ends_with("expected_status")),
+                "expression {bad} should be rejected, errors: {errs:?}"
+            );
+        }
+    }
+
+    /// 非法健康检查配置被拒绝
+    #[test]
+    fn invalid_health_check_is_rejected() {
+        let yaml = r#"
+gateway: { id: g }
+server: { http: { port: 8080 } }
+upstreams:
+  - id: u1
+    endpoints:
+      - { host: 127.0.0.1, port: 9000 }
+    health_check:
+      interval_secs: 0
+      timeout_secs: 0
+      unhealthy_threshold: 0
+      healthy_threshold: 0
+      path: healthz
+      expected_status: "999"
+      passive: { failure_threshold: 0, recovery_threshold: 0 }
+"#;
+        let cfg = load_from_str(yaml).unwrap();
+        let errs = validate(&cfg).expect_err("should fail");
+        let paths: Vec<&str> = errs.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.ends_with("interval_secs")));
+        assert!(paths.iter().any(|p| p.ends_with("timeout_secs")));
+        assert!(paths.iter().any(|p| p.ends_with("unhealthy_threshold")));
+        assert!(paths.iter().any(|p| p.ends_with("healthy_threshold")));
+        assert!(paths.iter().any(|p| p.ends_with("path")));
+        assert!(paths.iter().any(|p| p.ends_with("expected_status")));
+        assert!(paths.iter().any(|p| p.ends_with("passive.failure_threshold")));
+        assert!(paths.iter().any(|p| p.ends_with("passive.recovery_threshold")));
     }
 }

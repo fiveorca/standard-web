@@ -26,3 +26,10 @@ tokio = { workspace = true }
 tower = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+[dev-dependencies]
+# TLS 集成测试：生成自签名证书并作为客户端握手
+rcgen = "0.13"

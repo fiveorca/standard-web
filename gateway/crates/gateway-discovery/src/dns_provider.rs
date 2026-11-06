@@ -21,9 +21,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
 
-use gateway_core::{
-    DiscoveryError, DiscoveryHealth, EndpointConfig, ServiceDiscoveryProvider,
-};
+use gateway_core::{DiscoveryError, DiscoveryHealth, EndpointConfig, ServiceDiscoveryProvider};
 
 /// DNS 查询类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,8 +64,7 @@ impl DnsDiscoveryProvider {
     /// 报文构造与应答解析都在此函数内完成，无 unwrap/expect。
     async fn query(&self) -> Result<Vec<EndpointConfig>, DiscoveryError> {
         // 每个查询使用递增的 16 位 ID（DNS 协议要求匹配请求/应答）
-        static QUERY_ID: std::sync::atomic::AtomicU16 =
-            std::sync::atomic::AtomicU16::new(1);
+        static QUERY_ID: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(1);
         let id = QUERY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let qtype: u16 = match self.config.kind {
@@ -197,12 +194,8 @@ fn parse_response(
         match (kind, rtype) {
             // A 记录：4 字节 IPv4
             (DnsQueryKind::Address, 1) if rdlen == 4 => {
-                let ip = std::net::Ipv4Addr::new(
-                    buf[pos],
-                    buf[pos + 1],
-                    buf[pos + 2],
-                    buf[pos + 3],
-                );
+                let ip =
+                    std::net::Ipv4Addr::new(buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]);
                 out.push(EndpointConfig {
                     id: None,
                     host: ip.to_string(),

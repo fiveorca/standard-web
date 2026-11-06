@@ -145,7 +145,13 @@ where
             .http2_only(true)
             .build::<_, BoxBody<bytes::Bytes, BoxError>>(connector);
 
-        Self { client, h2_client, boxed_client, boxed_h2_client, options }
+        Self {
+            client,
+            h2_client,
+            boxed_client,
+            boxed_h2_client,
+            options,
+        }
     }
 
     /// 转发一个 body 已类型擦除的请求。
@@ -378,7 +384,10 @@ mod tests {
 
         let request = http::Request::builder().method("GET").body(Full::new(Bytes::new())).unwrap();
 
-        let err = client.forward(request, &endpoint, "/", None, None).await.expect_err("should fail");
+        let err = client
+            .forward(request, &endpoint, "/", None, None)
+            .await
+            .expect_err("should fail");
 
         assert!(matches!(err, GatewayError::UpstreamConnectionError { .. }));
     }

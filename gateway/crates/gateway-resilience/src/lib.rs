@@ -53,6 +53,5 @@ pub mod policy;
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerRegistry, CircuitState};
 pub use plugin::{CbDirection, CircuitBreakerPlugin, PLUGIN_NAME};
 pub use policy::{
-    CompiledBackoff, CompiledResiliencePolicies, CompiledRetryPolicy,
-    CompiledTimeoutPolicy,
+    CompiledBackoff, CompiledResiliencePolicies, CompiledRetryPolicy, CompiledTimeoutPolicy,
 };

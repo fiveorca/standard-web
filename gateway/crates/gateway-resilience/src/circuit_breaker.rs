@@ -284,22 +284,12 @@ mod tests {
     /// 辅助：构造默认熔断器（failure=3, success=2, open=100ms）
     /// failure_statuses 为空 → 默认 5xx 全量算失败
     fn breaker() -> Arc<CircuitBreaker> {
-        Arc::new(CircuitBreaker::new(
-            3,
-            2,
-            Duration::from_millis(100),
-            Vec::new(),
-        ))
+        Arc::new(CircuitBreaker::new(3, 2, Duration::from_millis(100), Vec::new()))
     }
 
     /// 辅助：构造自定义 failure_statuses 的熔断器
     fn breaker_with_statuses(statuses: Vec<u16>) -> Arc<CircuitBreaker> {
-        Arc::new(CircuitBreaker::new(
-            3,
-            2,
-            Duration::from_millis(100),
-            statuses,
-        ))
+        Arc::new(CircuitBreaker::new(3, 2, Duration::from_millis(100), statuses))
     }
 
     /// Closed 下连续成功一直放行

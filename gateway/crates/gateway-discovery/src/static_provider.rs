@@ -88,6 +88,7 @@ mod tests {
             algorithm: gateway_core::LoadBalanceAlgorithm::RoundRobin,
             endpoints,
             discovery: None,
+            health_check: None,
         }
     }
 

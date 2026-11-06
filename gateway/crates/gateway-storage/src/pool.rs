@@ -46,9 +46,7 @@ pub async fn create_pool(
 ) -> Result<PgPool, StorageError> {
     // 参数校验：0 连接会让后续所有请求永久等待
     if settings.max_connections == 0 {
-        return Err(StorageError::invalid_payload(
-            "pool max_connections must be >= 1",
-        ));
+        return Err(StorageError::invalid_payload("pool max_connections must be >= 1"));
     }
     if database_url.trim().is_empty() {
         return Err(StorageError::invalid_payload("database url must not be empty"));

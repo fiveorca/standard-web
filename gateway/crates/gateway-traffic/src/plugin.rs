@@ -111,10 +111,7 @@ impl Plugin for RateLimitPlugin {
         Ok(())
     }
 
-    async fn execute(
-        &self,
-        ctx: &mut PluginContext<'_>,
-    ) -> Result<PluginDecision, PluginError> {
+    async fn execute(&self, ctx: &mut PluginContext<'_>) -> Result<PluginDecision, PluginError> {
         // 1) 必须已有路由（RequestPostRoute 阶段）
         let route = match ctx.route.as_ref() {
             Some(route) => Arc::clone(route),
@@ -237,7 +234,9 @@ impl Plugin for RateLimitPlugin {
 mod tests {
     use super::*;
     use gateway_common::RequestId;
-    use gateway_core::{RateLimitAlgorithm, RateLimitKeyKind, RateLimitKeySpec, RequestContext, RouteConfig};
+    use gateway_core::{
+        RateLimitAlgorithm, RateLimitKeyKind, RateLimitKeySpec, RequestContext, RouteConfig,
+    };
 
     /// 辅助：构造带 rate_limit_policy_id 的路由
     fn route_with_policy(policy_id: Option<&str>) -> RouteConfig {
@@ -274,11 +273,7 @@ mod tests {
     fn make_ctx() -> (http::request::Parts, RequestContext) {
         let mut request_ctx = RequestContext::new(RequestId::new());
         request_ctx.client_ip = Some("192.168.1.1:1234".parse().expect("addr"));
-        let (parts, _) = http::Request::builder()
-            .uri("/")
-            .body(())
-            .expect("request")
-            .into_parts();
+        let (parts, _) = http::Request::builder().uri("/").body(()).expect("request").into_parts();
         (parts, request_ctx)
     }
 
@@ -291,7 +286,8 @@ mod tests {
 
         // 前 2 个放行（burst=2）
         for i in 0..2 {
-            let mut ctx = PluginContext::new(&mut parts, &mut request_ctx, Some(route.clone()), None);
+            let mut ctx =
+                PluginContext::new(&mut parts, &mut request_ctx, Some(route.clone()), None);
             let decision = plugin.execute(&mut ctx).await.expect("execute");
             assert!(decision.is_continue(), "request {i} should pass");
         }

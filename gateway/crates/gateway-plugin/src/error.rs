@@ -128,10 +128,7 @@ mod tests {
             plugin: "jwt".into(),
             message: "secret missing".into(),
         };
-        assert_eq!(
-            err.to_gateway_error().code(),
-            ErrorCode::GatewayConfigurationInvalid
-        );
+        assert_eq!(err.to_gateway_error().code(), ErrorCode::GatewayConfigurationInvalid);
     }
 
     /// 执行类错误映射为 Internal
