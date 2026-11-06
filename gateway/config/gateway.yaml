@@ -1,0 +1,202 @@
+# rust-api-gateway 主配置
+# 所有以 ${VAR:-default} 形式书写的值都会在启动时从环境变量注入。
+
+gateway:
+  server:
+    host: ${GATEWAY_HOST:-0.0.0.0}
+    port: ${GATEWAY_PORT:-8080}
+    enable_http2: true
+    max_connections: 10000
+    graceful_shutdown_timeout: 30s
+    trusted_proxies:
+      - 127.0.0.1/32
+      - ::1/128
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+    timeouts:
+      client_connect: 10s
+      idle: 75s
+      request: 60s
+    limits:
+      max_header_size: 32768
+      max_body_size: 67108864 # 64 MiB
+    tls:
+      enabled: ${GATEWAY_TLS_ENABLED:-false}
+      cert_path: ${GATEWAY_TLS_CERT:-}
+      key_path: ${GATEWAY_TLS_KEY:-}
+      client_ca_path: ${GATEWAY_TLS_CLIENT_CA:-}
+      min_version: "1.2"
+
+  admin:
+    enabled: true
+    host: ${GATEWAY_ADMIN_HOST:-127.0.0.1}
+    port: ${GATEWAY_ADMIN_PORT:-9090}
+    allowed_ips: []
+    auth:
+      mode: api_key
+      header: x-admin-key
+      api_keys:
+        - ${GATEWAY_ADMIN_KEY:-dev-admin-key}
+    persistence:
+      enabled: true
+      # 留空时使用配置目录下的 routes.yaml
+      path: ~
+
+  logging:
+    level: ${GATEWAY_LOG_LEVEL:-info}
+    format: json
+    access_log: true
+    redact_headers:
+      - authorization
+      - cookie
+      - set-cookie
+      - x-api-key
+      - x-admin-key
+
+  tracing:
+    enabled: ${GATEWAY_TRACING_ENABLED:-false}
+    endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318}
+    service_name: rust-api-gateway
+    sample_ratio: 0.1
+    headers: {}
+
+  metrics:
+    enabled: true
+    path: /metrics
+
+  security:
+    request_id_header: x-request-id
+    trust_client_request_id: true
+    add_security_headers: true
+    block_private_upstreams: false
+    host_validation:
+      enabled: false
+      allowed_hosts: []
+    extra_headers:
+      x-content-type-options: nosniff
+
+  authentication:
+    jwt:
+      algorithms: [HS256]
+      secret: ${GATEWAY_JWT_SECRET:-dev-jwt-secret-please-change}
+      # 使用 RS256/ES256 时改为对应算法并配置 JWKS：
+      # algorithms: [RS256]
+      # jwks_uri: https://auth.example.com/.well-known/jwks.json
+      jwks_uri: ~
+      issuer: ~
+      audience: []
+      leeway: 30
+      require_exp: true
+      required_claims: [sub]
+      header: authorization
+      prefix: Bearer
+      scope_claim: scope
+      roles_claim: roles
+      tenant_claim: tenant
+    api_keys:
+      - id: demo-key
+        key: ${GATEWAY_DEMO_API_KEY:-demo-api-key}
+        subject: demo-client
+        scopes: [read, write]
+        roles: [user]
+    api_key_header: x-api-key
+    identity_headers:
+      user_id: x-user-id
+      scopes: x-user-scopes
+      roles: x-user-roles
+      tenant: x-tenant-id
+      auth_type: x-auth-type
+
+  rate_limit:
+    enabled: false
+    mode: local
+    key_type: ip
+    fail_open: false
+    max_keys: 100000
+    quota:
+      requests_per_second: 1000
+      burst_capacity: 2000
+
+  cache:
+    enabled: false
+    default_ttl: 30s
+    max_capacity: 10000
+    cacheable_status: [200, 203, 204, 300, 301, 404, 405, 410, 414, 501]
+    max_body_size: 2097152
+
+  cors:
+    allowed_origins: ["*"]
+    allowed_methods: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+    allowed_headers: ["*"]
+    exposed_headers: [x-request-id, x-trace-id]
+    allow_credentials: false
+    max_age: 3600s
+
+  ip_filter:
+    allow: []
+    deny: []
+
+  upstream_tls:
+    verify: true
+
+  redis:
+    url: ${REDIS_URL:-redis://127.0.0.1:6379}
+    channel: gateway:config
+    connect_timeout: 2s
+    command_timeout: 1s
+
+  service_discovery:
+    refresh_interval: 10s
+    consul: ~
+
+  load_balancer:
+    strategy: round_robin
+    default_weight: 1
+
+  circuit_breaker:
+    enabled: false
+    failure_rate_threshold: 50
+    slow_call_duration: 2s
+    slow_call_rate_threshold: 80
+    sliding_window_size: 100
+    window_duration: 10s
+    minimum_requests: 10
+    open_duration: 15s
+    half_open_max_calls: 3
+    half_open_success_threshold: 2
+    fallback:
+      status: 503
+      body: "{\"error\":\"service_temporarily_unavailable\",\"code\":\"CIRCUIT_OPEN\"}"
+
+  services:
+    httpbin:
+      discovery: static
+      load_balancer: round_robin
+      instances:
+        - id: httpbin-1
+          uri: ${HTTPBIN_1_URI:-http://127.0.0.1:8081}
+          weight: 3
+        - id: httpbin-2
+          uri: ${HTTPBIN_2_URI:-http://127.0.0.1:8082}
+          weight: 1
+      health_check:
+        enabled: false
+        path: /status/200
+        interval: 10s
+        timeout: 2s
+    user-service:
+      discovery: static
+      load_balancer: least_connections
+      instances:
+        - id: user-1
+          uri: ${USER_SERVICE_URI:-http://127.0.0.1:8081}
+    search-service:
+      discovery: static
+      load_balancer: random
+      instances:
+        - id: search-1
+          uri: ${SEARCH_SERVICE_URI:-http://127.0.0.1:8081}
+
+  global_filters:
+    - SecureHeaders

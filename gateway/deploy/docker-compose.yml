@@ -1,0 +1,76 @@
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:9090:9090"
+    environment:
+      GATEWAY_PORT: "8080"
+      GATEWAY_ADMIN_HOST: "0.0.0.0"
+      GATEWAY_ADMIN_KEY: "change-me-in-production"
+      GATEWAY_JWT_SECRET: "change-me-in-production"
+      GATEWAY_PROFILE: "development"
+      REDIS_URL: "redis://redis:6379"
+      HTTPBIN_1_URI: "http://httpbin:80"
+      HTTPBIN_2_URI: "http://httpbin:80"
+      USER_SERVICE_URI: "http://httpbin:80"
+      SEARCH_SERVICE_URI: "http://httpbin:80"
+      GATEWAY_TLS_ENABLED: "false"
+      RUST_LOG: "info"
+    volumes:
+      - ../config:/etc/gateway/config
+      - gateway-data:/var/lib/gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+      httpbin:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9090/health/live"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  httpbin:
+    image: mccutchen/go-httpbin:latest
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  consul:
+    image: hashicorp/consul:1.19
+    command: ["agent", "-dev", "-client=0.0.0.0"]
+    ports:
+      - "127.0.0.1:8500:8500"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9091:9090"
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  prometheus-data:
+  gateway-data:

@@ -1,0 +1,39 @@
+# 生产环境覆盖配置：GATEWAY_PROFILE=production
+gateway:
+  server:
+    tls:
+      enabled: true
+      cert_path: ${GATEWAY_TLS_CERT:-/etc/gateway/tls/tls.crt}
+      key_path: ${GATEWAY_TLS_KEY:-/etc/gateway/tls/tls.key}
+      min_version: "1.2"
+  admin:
+    host: 127.0.0.1
+    allowed_ips:
+      - 127.0.0.1/32
+  logging:
+    level: info
+    format: json
+    access_log: true
+  tracing:
+    enabled: true
+    sample_ratio: 0.05
+  security:
+    trust_client_request_id: false
+    host_validation:
+      enabled: true
+      allowed_hosts:
+        - api.example.com
+    # 上游位于公网时开启；若后端使用内网地址（常见于 Kubernetes）请保持 false。
+    block_private_upstreams: false
+  rate_limit:
+    enabled: true
+    mode: redis
+    key_type: ip
+    fail_open: false
+    quota:
+      requests_per_second: 500
+      burst_capacity: 1000
+  cache:
+    enabled: true
+    default_ttl: 30s
+    max_capacity: 50000

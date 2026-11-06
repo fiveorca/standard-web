@@ -1,0 +1,14 @@
+# 开发环境覆盖配置：GATEWAY_PROFILE=development
+gateway:
+  logging:
+    level: debug
+    format: text
+  tracing:
+    enabled: false
+  security:
+    trust_client_request_id: true
+  circuit_breaker:
+    enabled: true
+    minimum_requests: 5
+  rate_limit:
+    enabled: false

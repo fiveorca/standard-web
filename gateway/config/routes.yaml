@@ -1,0 +1,165 @@
+# 路由配置
+# 谓词（predicates）之间是 AND 关系；order 越小优先级越高。
+
+routes:
+  # ------------------------------------------------------------------
+  # 公开接口：路径重写 + 重试 + 限流 + 响应缓存 + CORS
+  # ------------------------------------------------------------------
+  - id: public-httpbin
+    description: 公开的 httpbin 代理示例
+    uri: lb://httpbin
+    order: 100
+    predicates:
+      - Path=/api/httpbin/**
+      - Method=GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS
+    filters:
+      - StripPrefix=2
+      - AddRequestHeader=X-Gateway-Route,public-httpbin
+    timeout:
+      connect: 3s
+      response: 30s
+      total: 35s
+    retry:
+      enabled: true
+      max_attempts: 3
+      retry_on_connect_error: true
+      retry_on_timeout: true
+      retry_statuses: [502, 503, 504]
+      backoff_initial: 100ms
+      backoff_max: 2s
+      backoff_multiplier: 2.0
+      max_body_bytes: 1048576
+    rate_limit:
+      enabled: true
+      key_type: ip
+      quota:
+        requests_per_second: 50
+        burst_capacity: 100
+    cache:
+      enabled: true
+      ttl: 10s
+      max_capacity: 2000
+      cacheable_status: [200]
+      vary_headers: [accept]
+    cors:
+      allowed_origins: ["*"]
+      allowed_methods: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
+      allowed_headers: ["*"]
+      exposed_headers: [x-request-id, x-cache]
+      max_age: 600s
+    metadata:
+      owner: platform
+      tier: public
+
+  # ------------------------------------------------------------------
+  # 需要 JWT / API Key 认证，并要求 read scope
+  # ------------------------------------------------------------------
+  - id: secure-users
+    description: 需要认证的用户服务
+    uri: lb://user-service
+    order: 50
+    predicates:
+      - Path=/api/secure/**
+      - Method=GET,POST,PUT,DELETE
+    filters:
+      - StripPrefix=2
+      - RemoveRequestHeader=x-internal-token
+    authentication:
+      mode: authenticated
+    authorization:
+      scopes: [read]
+      roles: []
+    timeout:
+      response: 10s
+      total: 15s
+    circuit_breaker:
+      enabled: true
+      failure_rate_threshold: 50
+      slow_call_duration: 2s
+      slow_call_rate_threshold: 80
+      sliding_window_size: 50
+      window_duration: 10s
+      minimum_requests: 10
+      open_duration: 10s
+      half_open_max_calls: 2
+      half_open_success_threshold: 2
+      fallback:
+        status: 503
+        body: '{"success":false,"error":{"code":"CIRCUIT_OPEN","message":"user service is unavailable"}}'
+    metadata:
+      owner: identity
+      tier: internal
+
+  # ------------------------------------------------------------------
+  # API Key 认证 + 自定义限流 Key（按租户）
+  # ------------------------------------------------------------------
+  - id: tenant-search
+    description: 按租户限流的搜索服务
+    uri: lb://search-service
+    order: 60
+    predicates:
+      - Path=/api/search/**
+    filters:
+      - StripPrefix=2
+      - AddRequestParameter=source,gateway
+    authentication:
+      mode: api_key
+    rate_limit:
+      enabled: true
+      key_type: tenant
+      quota:
+        requests_per_minute: 600
+        burst_capacity: 50
+    metadata:
+      owner: search
+
+  # ------------------------------------------------------------------
+  # WebSocket 透传
+  # ------------------------------------------------------------------
+  - id: websocket-echo
+    description: WebSocket 隧道示例
+    uri: lb://httpbin
+    order: 40
+    predicates:
+      - Path=/ws/**
+    filters:
+      - StripPrefix=1
+    upstream:
+      protocol: auto
+      websocket: true
+    timeout:
+      response: 300s
+      total: 3600s
+
+  # ------------------------------------------------------------------
+  # gRPC（HTTP/2 + trailer 透传）
+  # ------------------------------------------------------------------
+  - id: grpc-service
+    description: gRPC 服务示例
+    uri: lb://httpbin
+    order: 40
+    predicates:
+      - Path=/grpc/**
+      - Header=content-type,application/grpc*
+    filters:
+      - StripPrefix=1
+    upstream:
+      protocol: http2
+    timeout:
+      total: 300s
+    retry:
+      enabled: false
+
+  # ------------------------------------------------------------------
+  # 兜底路由
+  # ------------------------------------------------------------------
+  - id: default
+    description: 兜底转发到 httpbin
+    uri: lb://httpbin
+    order: 1000
+    predicates:
+      - Path=/**
+    timeout:
+      total: 30s
+    metadata:
+      tier: fallback
