@@ -1,0 +1,98 @@
+name: identity-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  auth:
+    build:
+      context: ./auth
+    environment:
+      AUTH__SERVER__PUBLIC_BASE_URL: http://localhost:8080
+      AUTH__SERVER__CORS_ALLOWED_ORIGINS: '["http://localhost:3000","http://localhost:8081"]'
+      AUTH__DATABASE__URL: postgres://auth_center:auth_center@postgres:5432/auth_center
+      AUTH__REDIS__URL: redis://redis:6379/0
+      AUTH__SECURITY__MASTER_KEY: 3geuNbeEwCC5OwBz78oo3fbuecUVKlNa4NmP1beftWQ=
+      AUTH__SECURITY__INTERNAL_TOKEN: dev-internal-token-change-me-0001
+      AUTH__SECURITY__COOKIE_SECURE: "false"
+      AUTH__SECURITY__ALLOWED_REDIRECT_ORIGINS: '["http://localhost:3000","http://localhost:8081"]'
+      AUTH__EVENTS__PUBLISH_URLS: '["http://user:8081/api/v1/internal/events"]'
+      AUTH__EVENTS__SERVICE_TOKEN: dev-internal-token-change-me-0001
+      AUTH__EVENTS__ALLOW_HTTP_TARGETS: "true"
+      AUTH__LOGGING__LEVEL: info
+      AUTH_SEED_ADMIN_USERNAME: admin
+      AUTH_SEED_ADMIN_EMAIL: admin@example.com
+      AUTH_SEED_ADMIN_PASSWORD: Admin12345!
+      AUTH_SEED_USER_CENTER_SECRET: user-center-dev-secret-0123456789
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  user:
+    build:
+      context: ./user
+    environment:
+      USER__SERVER__PUBLIC_BASE_URL: http://localhost:8081
+      USER__SERVER__CORS_ALLOWED_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+      USER__DATABASE__URL: postgres://user_center:user_center@postgres:5432/user_center
+      USER__REDIS__URL: redis://redis:6379/1
+      USER__AUTH__BASE_URL: http://auth:8080
+      USER__AUTH__ISSUER: http://localhost:8080
+      USER__AUTH__AUDIENCE: http://localhost:8080/api
+      USER__AUTH__INTERNAL_TOKEN: dev-internal-token-change-me-0001
+      USER__AUTH__SERVICE_CLIENT_ID: user-center
+      USER__AUTH__SERVICE_CLIENT_SECRET: user-center-dev-secret-0123456789
+      USER__LOGGING__LEVEL: info
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:

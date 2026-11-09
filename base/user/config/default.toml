@@ -1,0 +1,46 @@
+# 用户中心默认配置。
+# 生产环境请通过 USER__SECTION__KEY 环境变量覆盖敏感项。
+
+[server]
+bind = "0.0.0.0:8081"
+public_base_url = "http://localhost:8081"
+request_timeout_secs = 30
+max_body_bytes = 8388608
+cors_allowed_origins = ["http://localhost:3000", "http://localhost:8080"]
+trust_proxy_headers = true
+
+[database]
+url = "postgres://user_center:user_center@localhost:5432/user_center"
+max_connections = 20
+min_connections = 2
+auto_migrate = true
+acquire_timeout_secs = 10
+
+[redis]
+url = "redis://localhost:6379/1"
+key_prefix = "user-center"
+required = false
+
+[auth]
+base_url = "http://localhost:8080"
+internal_token = "dev-internal-token-change-me-0001"
+issuer = "http://localhost:8080"
+audience = "http://localhost:8080/api"
+service_client_id = "user-center"
+service_client_secret = ""
+timeout_secs = 10
+jwks_cache_secs = 300
+
+[logging]
+level = "info"
+format = "json"
+
+[batch]
+max_items = 500
+outbox_poll_interval_secs = 5
+outbox_max_attempts = 10
+
+[registration]
+enabled = true
+require_review = false
+rate_limit_per_minute = 10
