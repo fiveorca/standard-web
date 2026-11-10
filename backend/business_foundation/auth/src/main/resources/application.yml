@@ -1,0 +1,62 @@
+server:
+  port: ${AUTH_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: auth-center
+  datasource:
+    url: ${AUTH_DATABASE_URL:jdbc:postgresql://localhost:5432/auth_center}
+    username: ${AUTH_DATABASE_USER:postgres}
+    password: ${AUTH_DATABASE_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: ${AUTH_DB_POOL_SIZE:20}
+      connection-timeout: 5000
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DB:0}
+      password: ${REDIS_PASSWORD:}
+      timeout: 800ms
+      connect-timeout: 800ms
+
+app:
+  issuer: ${AUTH_ISSUER:http://localhost:8080}
+  base-url: ${AUTH_BASE_URL:http://localhost:8080}
+  internal-token: ${AUTH_INTERNAL_TOKEN:dev-internal-token-change-me}
+  encryption-key: ${AUTH_ENCRYPTION_KEY:dev-encryption-key-change-me-32bytes}
+  cookie-domain: ${AUTH_COOKIE_DOMAIN:}
+  cookie-secure: ${AUTH_COOKIE_SECURE:false}
+  cors-origins: ${AUTH_CORS_ORIGINS:*}
+  registration-enabled: ${AUTH_REGISTRATION_ENABLED:true}
+  require-email-verification: ${AUTH_REQUIRE_EMAIL_VERIFICATION:false}
+  access-token-ttl: ${AUTH_ACCESS_TTL:900}
+  refresh-token-ttl: ${AUTH_REFRESH_TTL:2592000}
+  id-token-ttl: ${AUTH_ID_TOKEN_TTL:900}
+  session-ttl: ${AUTH_SESSION_TTL:604800}
+  code-ttl: ${AUTH_CODE_TTL:300}
+  events-target: ${AUTH_EVENTS_TARGET:http://localhost:8081/api/v1/internal/events}
+  user-service-url: ${USER_SERVICE_URL:http://localhost:8081}
+  notification-webhook: ${AUTH_NOTIFICATION_WEBHOOK:}
+  login-max-attempts: ${AUTH_LOGIN_MAX_ATTEMPTS:5}
+  login-lock-seconds: ${AUTH_LOGIN_LOCK_SECONDS:900}
+  otp-ttl-seconds: ${AUTH_OTP_TTL:300}
+  password-max-age-days: ${AUTH_PASSWORD_MAX_AGE_DAYS:0}
+  webauthn-rp-id: ${AUTH_WEBAUTHN_RP_ID:localhost}
+  webauthn-rp-name: ${AUTH_WEBAUTHN_RP_NAME:Auth Center}
+  webauthn-origin: ${AUTH_WEBAUTHN_ORIGIN:http://localhost:8080}
+  bootstrap-enabled: ${AUTH_BOOTSTRAP_ENABLED:true}
+  bootstrap-admin-username: ${AUTH_BOOTSTRAP_ADMIN_USERNAME:admin}
+  bootstrap-admin-email: ${AUTH_BOOTSTRAP_ADMIN_EMAIL:admin@example.com}
+  bootstrap-admin-password: ${AUTH_BOOTSTRAP_ADMIN_PASSWORD:Admin@12345}
+  bootstrap-client-secret: ${AUTH_BOOTSTRAP_CLIENT_SECRET:dev-client-secret-change-me}
+
+logging:
+  level:
+    root: INFO
+    com.platform.auth: INFO

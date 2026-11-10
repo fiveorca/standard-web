@@ -1,9 +1,8 @@
 target/
-**/*.rs.bk
 .DS_Store
 .idea/
 .vscode/
 *.log
 *.tmp
-config/routes.yaml.tmp
+.env
 coverage/

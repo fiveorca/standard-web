@@ -1,19 +1,21 @@
-FROM rust:1.88-bookworm AS builder
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY migrations ./migrations
+# 构建阶段
+FROM maven:3.9-eclipse-temurin-25 AS builder
+WORKDIR /build
+COPY pom.xml .
+RUN mvn -B -q dependency:go-offline
 COPY src ./src
-RUN cargo build --release --bin user-center
+RUN mvn -B -q -DskipTests package
 
-FROM debian:bookworm-slim
+# 运行阶段
+FROM eclipse-temurin:25-jre
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
-RUN useradd --system --uid 10001 --create-home app
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --create-home app
 WORKDIR /app
-COPY --from=builder /app/target/release/user-center /usr/local/bin/user-center
-COPY config ./config
-ENV USER_CONFIG_DIR=/app/config
-USER 10001
+COPY --from=builder /build/target/user-center.jar /app/user-center.jar
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75"
 EXPOSE 8081
-ENTRYPOINT ["user-center"]
+USER 10001
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/user-center.jar"]

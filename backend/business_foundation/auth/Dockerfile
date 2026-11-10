@@ -1,19 +1,18 @@
-FROM rust:1.88-bookworm AS builder
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY migrations ./migrations
+FROM maven:3.9-eclipse-temurin-25 AS builder
+WORKDIR /build
+COPY pom.xml .
+RUN mvn -B -q -DskipTests dependency:go-offline
 COPY src ./src
-RUN cargo build --release --bin auth-center
+RUN mvn -B -q -DskipTests package
 
-FROM debian:bookworm-slim
+FROM eclipse-temurin:25-jre
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --create-home app
 WORKDIR /app
-COPY --from=builder /app/target/release/auth-center /usr/local/bin/auth-center
-COPY config ./config
-ENV AUTH_CONFIG_DIR=/app/config
+COPY --from=builder /build/target/auth-center-1.0.0.jar /app/app.jar
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75"
 USER 10001
 EXPOSE 8080
-ENTRYPOINT ["auth-center"]
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
