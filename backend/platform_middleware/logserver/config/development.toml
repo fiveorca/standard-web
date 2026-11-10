@@ -1,0 +1,22 @@
+# 开发环境配置
+extends = "default.toml"
+
+[server]
+mode = "all"
+
+[kafka]
+brokers = "localhost:9092"
+
+[clickhouse]
+url = "http://localhost:8123"
+user = "default"
+password = ""
+database = "log_center"
+
+[observability]
+tracing_enabled = false
+metrics_enabled = true
+
+[batch]
+flush_interval_ms = 2000
+max_rows = 1000

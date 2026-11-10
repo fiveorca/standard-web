@@ -1,0 +1,157 @@
+# Logserver Docker Compose 开发环境
+#
+# 使用:
+#   docker compose up -d
+#   docker compose logs -f logserver-api
+#   docker compose down
+
+services:
+  # ============ Kafka (KRaft 模式, 单节点开发) ============
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: logserver-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=false
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_LOG_DIRS=/kafka/logs
+      - KAFKA_CFG_LOG_RETENTION_HOURS=168
+      - KAFKA_CFG_NUM_PARTITIONS=4
+      - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=1
+    volumes:
+      - kafka-data:/kafka/logs
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - log-net
+
+  kafka-init:
+    image: bitnami/kafka:3.7
+    container_name: logserver-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: >
+      bash -c "
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic log-events-v1 --partitions 8 --replication-factor 1 &&
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic log-events-v1-dlq --partitions 4 --replication-factor 1 &&
+        echo 'Topics created'
+      "
+    networks:
+      - log-net
+
+  # ============ ClickHouse ============
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.2
+    container_name: logserver-clickhouse
+    user: "101:101"
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_DB=log_center
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./migrations/clickhouse/001_create_database.sql:/docker-entrypoint-initdb.d/001.sql:ro
+      - ./migrations/clickhouse/002_create_logs_table.sql:/docker-entrypoint-initdb.d/002.sql:ro
+      - ./migrations/clickhouse/003_create_indexes.sql:/docker-entrypoint-initdb.d/003.sql:ro
+      - ./migrations/clickhouse/004_create_dlq_and_user.sql:/docker-entrypoint-initdb.d/004.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - log-net
+
+  # ============ Logserver API (Axum + Tonic) ============
+  logserver-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: api
+    image: logserver:api
+    container_name: logserver-api
+    depends_on:
+      - kafka-init
+      - clickhouse
+    environment:
+      - LOGSERVER_MODE=api
+      - KAFKA_BROKERS=kafka:9092
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_DATABASE=log_center
+    ports:
+      - "8080:8080"   # Axum HTTP
+      - "9090:9090"   # Tonic gRPC
+      - "8081:8081"   # Prometheus metrics
+    restart: unless-stopped
+    networks:
+      - log-net
+
+  # ============ Logserver Worker ============
+  logserver-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: worker
+    image: logserver:worker
+    container_name: logserver-worker
+    depends_on:
+      - kafka-init
+      - clickhouse
+    environment:
+      - LOGSERVER_MODE=worker
+      - KAFKA_BROKERS=kafka:9092
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_DATABASE=log_center
+    restart: unless-stopped
+    networks:
+      - log-net
+
+  # ============ Grafana ============
+  grafana:
+    image: grafana/grafana-oss:11.5
+    container_name: logserver-grafana
+    depends_on:
+      - clickhouse
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - log-net
+
+volumes:
+  kafka-data:
+  clickhouse-data:
+  grafana-data:
+
+networks:
+  log-net:
+    driver: bridge

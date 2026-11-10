@@ -1,0 +1,123 @@
+# 日志服务默认配置
+[server]
+# 运行模式: api | worker | all
+mode = "all"
+# 关闭优雅等待时间
+graceful_shutdown_ms = 10000
+
+[http]
+host = "0.0.0.0"
+port = 8080
+# 请求大小限制 (默认 4MB)
+max_request_mb = 4
+# 请求体超时
+request_timeout_ms = 30000
+
+[grpc]
+host = "0.0.0.0"
+port = 9090
+# TLS 配置 (生产环境启用)
+# tls_enabled = false
+# tls_cert_path = "/path/to/cert.pem"
+# tls_key_path = "/path/to/key.pem"
+
+# gRPC 接收限制
+[grpc_limits]
+max_batch_events = 500
+max_event_kb = 256
+max_batch_mb = 4
+# 并发限制
+concurrency_limit = 256
+
+[kafka]
+# Kafka Broker 列表
+brokers = "localhost:9092"
+# 主 Topic
+raw_topic = "logs.raw.v1"
+# 死信 Topic
+dlq_topic = "logs.dlq.v1"
+# 生产者配置
+producer_acks = "all"
+producer_idempotence = true
+producer_retries = 3
+producer_request_timeout_ms = 5000
+producer_max_in_flight = 5
+# 消费者组
+consumer_group = "log-service-writer"
+# 消费起始位点: earliest | latest
+consumer_auto_offset_reset = "latest"
+# 消费超时
+consumer_poll_timeout_ms = 1000
+
+# ClickHouse 配置
+[clickhouse]
+url = "http://localhost:8123"
+# HTTP 协议
+# protocol = "http"
+user = "default"
+password = ""
+database = "log_center"
+# 写入超时
+insert_timeout_ms = 30000
+# 查询超时
+query_timeout_ms = 60000
+
+# Worker 批量配置
+[batch]
+max_rows = 5000
+max_bytes_mb = 16
+flush_interval_ms = 1000
+max_concurrent_inserts = 4
+
+# 日志保留配置
+[retention]
+default_retention_days = 30
+
+# 查询配置
+[query]
+# 单次查询最大时间范围 (小时)
+max_time_range_hours = 168
+# 单次最大返回数量
+max_result_rows = 10000
+# SQL 执行超时
+sql_timeout_ms = 30000
+# 默认分页大小
+default_page_size = 100
+max_page_size = 1000
+
+# 脱敏配置
+[security]
+# 是否启用脱敏
+sanitize_enabled = true
+# 脱敏掩码
+sanitize_mask = "***REDACTED***"
+# 需要脱敏的字段名 (不区分大小写)
+sensitive_fields = [
+    "password",
+    "passwd",
+    "pwd",
+    "accessToken",
+    "refreshToken",
+    "authorization",
+    "cookie",
+    "secret",
+    "apiKey",
+    "api_secret",
+    "creditCard",
+    "ssn"
+]
+
+[auth]
+# API Token 认证的 Header 名
+api_token_header = "X-API-Token"
+# 服务间通信 Header
+service_name_header = "X-Service-Name"
+
+# 可观测性
+[observability]
+# tracing
+tracing_enabled = false
+otlp_endpoint = "http://localhost:4317"
+# Prometheus metrics
+metrics_enabled = true
+metrics_path = "/metrics"

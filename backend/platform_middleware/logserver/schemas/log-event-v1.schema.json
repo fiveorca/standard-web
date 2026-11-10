@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://log-service.internal/schemas/log-event-v1.schema.json",
+  "title": "LogEvent",
+  "description": "统一日志数据规范 v1.0",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "@timestamp",
+    "level",
+    "serviceName",
+    "message"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "数据结构版本",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "example": "1.0"
+    },
+    "eventId": {
+      "type": "string",
+      "description": "日志唯一标识 (UUID)",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "@timestamp": {
+      "type": "string",
+      "description": "日志产生时间 (ISO 8601 UTC)",
+      "format": "date-time"
+    },
+    "level": {
+      "type": "string",
+      "enum": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
+      "description": "日志级别"
+    },
+    "serviceName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "业务服务名称"
+    },
+    "serviceVersion": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "业务服务版本"
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["dev", "test", "staging", "prod"],
+      "description": "部署环境"
+    },
+    "hostName": {
+      "type": "string",
+      "maxLength": 255,
+      "description": "来源服务器主机名"
+    },
+    "logger": {
+      "type": "string",
+      "maxLength": 255,
+      "description": "Logger 名称"
+    },
+    "threadName": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "线程名称"
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "description": "日志正文"
+    },
+    "traceId": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "链路追踪 ID"
+    },
+    "spanId": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Span ID"
+    },
+    "requestId": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "请求 ID"
+    },
+    "tenantId": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "租户 ID"
+    },
+    "exception": {
+      "type": ["object", "null"],
+      "description": "异常详情",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "maxLength": 255 },
+        "message": { "type": "string", "maxLength": 4096 },
+        "stackTrace": { "type": "string" }
+      }
+    },
+    "attributes": {
+      "type": ["object", "null"],
+      "description": "扩展业务属性",
+      "maxProperties": 50,
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    }
+  },
+  "maxProperties": 20
+}

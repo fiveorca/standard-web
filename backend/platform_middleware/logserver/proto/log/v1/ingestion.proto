@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package log.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/wrappers.proto";
+
+// 统一日志模型
+message LogEvent {
+    string schema_version = 1;
+    string event_id = 2;
+    google.protobuf.Timestamp log_time = 3;
+    string level = 4;
+    string service_name = 5;
+    string service_version = 6;
+    string environment = 7;
+    string host_name = 8;
+    string logger = 9;
+    string thread_name = 10;
+    string message = 11;
+    string trace_id = 12;
+    string span_id = 13;
+    string request_id = 14;
+    string tenant_id = 15;
+    ExceptionInfo exception = 16;
+    map<string, string> attributes = 17;
+}
+
+message ExceptionInfo {
+    string type = 1;
+    string message = 2;
+    string stack_trace = 3;
+}
+
+// 批量投递请求
+message IngestBatchRequest {
+    repeated LogEvent events = 1;
+}
+
+message IngestBatchResponse {
+    string request_id = 1;
+    uint32 accepted_count = 2;
+    uint32 rejected_count = 3;
+    repeated RejectedEvent rejected_events = 4;
+}
+
+message RejectedEvent {
+    uint32 index = 1;
+    string event_id = 2;
+    string reason = 3;
+}
+
+// 流式投递
+message StreamLogRequest {
+    LogEvent event = 1;
+}
+
+message StreamLogResponse {
+    string request_id = 1;
+    uint32 accepted_count = 2;
+    uint32 rejected_count = 3;
+}
+
+service LogIngestionService {
+    rpc IngestBatch(IngestBatchRequest) returns (IngestBatchResponse);
+    rpc StreamLogs(stream StreamLogRequest) returns (StreamLogResponse);
+}

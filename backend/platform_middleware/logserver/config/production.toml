@@ -1,0 +1,32 @@
+# 生产环境配置 (示例，实际部署通过环境变量覆盖)
+extends = "default.toml"
+
+[server]
+mode = "api"  # 或 "worker"，按容器部署
+
+[grpc_limits]
+concurrency_limit = 1024
+
+[kafka]
+brokers = "kafka-1:9092,kafka-2:9092,kafka-3:9092"
+producer_acks = "all"
+producer_idempotence = true
+
+[clickhouse]
+url = "http://clickhouse:8123"
+user = "logserver_rw"
+# password 通过环境变量 CH_PASSWORD 注入
+
+[retention]
+default_retention_days = 30
+
+[batch]
+max_rows = 10000
+max_bytes_mb = 32
+flush_interval_ms = 500
+max_concurrent_inserts = 8
+
+[observability]
+tracing_enabled = true
+otlp_endpoint = "http://jaeger-collector:4317"
+metrics_enabled = true

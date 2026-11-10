@@ -1,0 +1,162 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "日志写入 QPS (Kafka)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(logserver_kafka_produced_total[5m])",
+          "legendFormat": "produced/s"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(logserver_worker_consumed_total[5m])",
+          "legendFormat": "consumed/s"
+        }
+      ]
+    },
+    {
+      "title": "Worker 写入 ClickHouse 批次大小",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(logserver_worker_batch_written_total[5m]) / rate(logserver_worker_batch_flushed_total[5m])",
+          "legendFormat": "avg events/batch"
+        }
+      ]
+    },
+    {
+      "title": "gRPC 接收/拒绝",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(logserver_grpc_accepted_total[5m])",
+          "legendFormat": "accepted/s"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(logserver_grpc_rejected_total[5m])",
+          "legendFormat": "rejected/s"
+        }
+      ]
+    },
+    {
+      "title": "DLQ 错误计数",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "logserver_worker_dlq_total",
+          "legendFormat": "DLQ events"
+        }
+      ],
+      "thresholds": {
+        "steps": [
+          { "color": "green", "value": null },
+          { "color": "red", "value": 1 }
+        ]
+      }
+    },
+    {
+      "title": "ClickHouse 总日志量",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "format": "time_series",
+          "rawSql": "SELECT log_time AS t, count() AS cnt FROM logs WHERE tenant_id = ${tenant} AND log_time >= $__timeFrom() AND log_time <= $__timeTo() GROUP BY toStartOfMinute(log_time) AS t ORDER BY t",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "按 Level 分布 (Top 1h)",
+      "type": "piechart",
+      "gridPos": { "h": 12, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "format": "table",
+          "rawSql": "SELECT level, count() AS cnt FROM logs WHERE tenant_id = ${tenant} AND log_time >= $__timeFrom() AND log_time <= $__timeTo() GROUP BY level",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Service 写入排行 (Top 10)",
+      "type": "barchart",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "format": "table",
+          "rawSql": "SELECT service_name, count() AS cnt FROM logs WHERE tenant_id = ${tenant} AND log_time >= $__timeFrom() AND log_time <= $__timeTo() GROUP BY service_name ORDER BY cnt DESC LIMIT 10",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } }
+      }
+    },
+    {
+      "title": "查询延迟 (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, rate(logserver_http_query_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95 query latency (s)"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "tags": ["logserver", "logging", "observability"],
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+        "query": "SELECT DISTINCT tenant_id FROM logs ORDER BY tenant_id",
+        "current": { "text": "default", "value": "default" },
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Logserver 监控",
+  "uid": "logserver-overview",
+  "version": 1
+}
