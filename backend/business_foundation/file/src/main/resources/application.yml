@@ -1,0 +1,106 @@
+server:
+  port: ${FILE_PORT:8082}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+
+spring:
+  application:
+    name: file-service
+  datasource:
+    url: ${FILE_DATABASE_URL:jdbc:postgresql://localhost:5432/file_service}
+    username: ${FILE_DATABASE_USER:file_service}
+    password: ${FILE_DATABASE_PASSWORD:file_service}
+    hikari:
+      maximum-pool-size: ${FILE_DB_POOL_SIZE:16}
+      minimum-idle: 2
+      connection-timeout: ${FILE_DB_CONNECT_TIMEOUT_MS:5000}
+      validation-timeout: 2000
+  flyway:
+    enabled: ${FILE_FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
+  servlet:
+    multipart:
+      max-file-size: ${FILE_MULTIPART_MAX_FILE_SIZE:5GB}
+      max-request-size: ${FILE_MULTIPART_MAX_REQUEST_SIZE:5GB}
+      file-size-threshold: 0
+  jackson:
+    time-zone: UTC
+    default-property-inclusion: non_null
+  mvc:
+    async:
+      request-timeout: 600000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: file-service
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /docs
+    operations-sorter: method
+    tags-sorter: alpha
+
+file:
+  public-base-url: ${FILE_PUBLIC_BASE_URL:http://localhost:8082}
+  cors: ${CORS:*}
+  trust-proxy: ${FILE_TRUST_PROXY:true}
+  security:
+    api-key: ${FILE_API_KEY:}
+    max-file-size: ${FILE_MAX_FILE_SIZE:5368709120}
+    allowed-extensions: ${FILE_ALLOWED_EXTENSIONS:jpg,jpeg,png,gif,webp,bmp,pdf,doc,docx,xls,xlsx,ppt,pptx,txt,csv,json,xml,zip,gz,mp4,webm,mp3,ogg,wav}
+    allowed-mime-types: ${FILE_ALLOWED_MIME_TYPES:image/*,application/pdf,text/*,application/json,application/xml,application/zip,application/gzip,application/msword,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.*,video/mp4,video/webm,audio/*}
+    sniff-content: ${FILE_SNIFF_CONTENT:true}
+  storage:
+    local-root: ${FILE_LOCAL_ROOT:./data/storage}
+    temp-prefix: ${FILE_TEMP_PREFIX:temporary/}
+    permanent-prefix: ${FILE_PERMANENT_PREFIX:permanent/}
+    upload-work-dir: ${FILE_UPLOAD_WORK_DIR:./data/upload-tmp}
+  upload:
+    expiry-seconds: ${FILE_UPLOAD_EXPIRY_SECONDS:3600}
+    max-part-size: ${FILE_UPLOAD_MAX_PART_SIZE:104857600}
+    min-part-size: ${FILE_UPLOAD_MIN_PART_SIZE:5242880}
+    max-parts: ${FILE_UPLOAD_MAX_PARTS:1000}
+    confirm-timeout-minutes: ${FILE_CONFIRM_TIMEOUT_MINUTES:30}
+  download:
+    url-ttl-seconds: ${FILE_DOWNLOAD_URL_TTL:300}
+    token-secret: ${FILE_DOWNLOAD_SECRET:}
+  cleanup:
+    enabled: ${FILE_CLEANUP_ENABLED:true}
+    dry-run: ${FILE_CLEANUP_DRY_RUN:false}
+    orphan-safety-minutes: ${FILE_ORPHAN_SAFETY_MINUTES:1440}
+    delete-grace-minutes: ${FILE_DELETE_GRACE_MINUTES:10}
+    batch-size: ${FILE_CLEANUP_BATCH_SIZE:200}
+    max-per-run: ${FILE_CLEANUP_MAX_PER_RUN:1000}
+    lock-seconds: ${FILE_CLEANUP_LOCK_SECONDS:900}
+    expiry-interval-ms: ${FILE_EXPIRY_INTERVAL_MS:60000}
+    delete-interval-ms: ${FILE_DELETE_INTERVAL_MS:300000}
+    scan-interval-ms: ${FILE_SCAN_INTERVAL_MS:3600000}
+    consistency-interval-ms: ${FILE_CONSISTENCY_INTERVAL_MS:3600000}
+  encryption:
+    # 必须是 Base64 编码的 32 字节密钥，生产环境通过环境变量/密钥管理注入。
+    key: ${FILE_ENCRYPTION_KEY:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+  seed:
+    enabled: ${FILE_SEED_ENABLED:true}
+    local-provider-code: ${FILE_SEED_LOCAL_CODE:local-default}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] [upload=%X{uploadId:-} file=%X{fileId:-} object=%X{fileObjectId:-} provider=%X{storageProviderId:-} op=%X{operation:-}] %logger{36} - %msg%n"
+  level:
+    root: INFO
+    com.platform.file: INFO

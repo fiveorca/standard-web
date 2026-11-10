@@ -1,0 +1,11 @@
+logging:
+  level:
+    com.platform.file: DEBUG
+
+file:
+  security:
+    api-key: ${FILE_API_KEY:dev-file-api-key-change-me}
+  storage:
+    local-root: ${FILE_LOCAL_ROOT:./data/storage}
+  seed:
+    enabled: true

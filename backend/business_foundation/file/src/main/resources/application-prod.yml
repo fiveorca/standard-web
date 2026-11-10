@@ -1,0 +1,10 @@
+logging:
+  level:
+    com.platform.file: INFO
+
+file:
+  seed:
+    enabled: false
+  cleanup:
+    enabled: true
+    dry-run: false

@@ -1,0 +1,19 @@
+spring:
+  flyway:
+    enabled: true
+
+file:
+  security:
+    api-key: ""
+  storage:
+    local-root: ${java.io.tmpdir}/file-service-test/storage
+    upload-work-dir: ${java.io.tmpdir}/file-service-test/upload
+  cleanup:
+    enabled: false
+  seed:
+    enabled: true
+
+logging:
+  level:
+    root: WARN
+    com.platform.file: INFO

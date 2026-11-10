@@ -1,0 +1,104 @@
+name: file-service
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: file-postgres
+    environment:
+      POSTGRES_DB: ${FILE_DATABASE_NAME:-file_service}
+      POSTGRES_USER: ${FILE_DATABASE_USER:-file_service}
+      POSTGRES_PASSWORD: ${FILE_DATABASE_PASSWORD:-file_service}
+    ports:
+      - "${FILE_DB_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FILE_DATABASE_USER:-file_service} -d ${FILE_DATABASE_NAME:-file_service}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: file-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: file-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-file-bucket}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do sleep 2; done;
+      mc mb --ignore-existing local/$$MINIO_BUCKET;
+      exit 0;
+      "
+    restart: "no"
+
+  file-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: file-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      FILE_PORT: 8082
+      FILE_PUBLIC_BASE_URL: ${FILE_PUBLIC_BASE_URL:-http://localhost:8082}
+      CORS: ${CORS:-*}
+      FILE_TRUST_PROXY: "true"
+      FILE_API_KEY: ${FILE_API_KEY:-dev-file-api-key-change-me}
+      FILE_DATABASE_URL: jdbc:postgresql://postgres:5432/${FILE_DATABASE_NAME:-file_service}
+      FILE_DATABASE_USER: ${FILE_DATABASE_USER:-file_service}
+      FILE_DATABASE_PASSWORD: ${FILE_DATABASE_PASSWORD:-file_service}
+      FILE_FLYWAY_ENABLED: "true"
+      FILE_LOCAL_ROOT: /app/data/storage
+      FILE_UPLOAD_WORK_DIR: /app/data/upload-tmp
+      FILE_CLEANUP_ENABLED: ${FILE_CLEANUP_ENABLED:-true}
+      FILE_CLEANUP_DRY_RUN: ${FILE_CLEANUP_DRY_RUN:-false}
+      FILE_ENCRYPTION_KEY: ${FILE_ENCRYPTION_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+      # MinIO 作为 S3 兼容存储的示例凭据，可在管理接口中创建对应存储实例。
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-file-bucket}
+    ports:
+      - "${FILE_PORT:-8082}:8082"
+    volumes:
+      - file-storage:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  minio-data:
+  file-storage:
