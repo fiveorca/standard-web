@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package platform.im.email.v1;
+
+option java_package = "com.platform.im.grpc.proto.email";
+option java_multiple_files = true;
+option java_outer_classname = "EmailServiceProto";
+
+// 平台内部邮件发送契约。
+service EmailService {
+  // 受理单封邮件，返回任务 ID，实际发送由后台 Worker 异步完成。
+  rpc SendEmail (SendEmailRequest) returns (EmailTaskResponse);
+
+  // 批量受理邮件。
+  rpc BatchSendEmail (BatchSendEmailRequest) returns (BatchSendEmailResponse);
+
+  // 按任务 ID 或请求 ID 查询发送状态。
+  rpc GetEmailStatus (GetEmailStatusRequest) returns (EmailStatusResponse);
+}
+
+message EmailAttachment {
+  string filename = 1;
+  string content_type = 2;
+  bytes content = 3;
+}
+
+message SendEmailRequest {
+  string request_id = 1;
+  string sender_id = 2;
+  string tenant_id = 3;
+  repeated string to = 4;
+  repeated string cc = 5;
+  repeated string bcc = 6;
+  string subject = 7;
+  string text_body = 8;
+  string html_body = 9;
+  repeated EmailAttachment attachments = 10;
+
+  reserved 20 to 29;
+}
+
+message BatchSendEmailRequest {
+  repeated SendEmailRequest requests = 1;
+}
+
+message EmailTaskResponse {
+  string task_id = 1;
+  string status = 2;
+  bool accepted = 3;
+  string code = 4;
+  string message = 5;
+  string request_id = 6;
+}
+
+message BatchSendEmailResponse {
+  int32 total = 1;
+  int32 accepted_count = 2;
+  repeated EmailTaskResponse results = 3;
+}
+
+message GetEmailStatusRequest {
+  string task_id = 1;
+  string request_id = 2;
+  string tenant_id = 3;
+}
+
+message EmailStatusResponse {
+  string task_id = 1;
+  string request_id = 2;
+  string status = 3;
+  int32 attempts = 4;
+  string last_error = 5;
+  string provider_message_id = 6;
+  string accepted_at = 7;
+  string finished_at = 8;
+}

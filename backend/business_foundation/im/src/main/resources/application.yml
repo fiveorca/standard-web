@@ -1,0 +1,153 @@
+server:
+  port: ${IM_HTTP_PORT:8080}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+
+spring:
+  application:
+    name: im-service
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${IM_DATABASE_URL:jdbc:postgresql://localhost:5432/im_service}
+    username: ${IM_DATABASE_USER:im_service}
+    password: ${IM_DATABASE_PASSWORD:im_service}
+    hikari:
+      maximum-pool-size: ${IM_DB_POOL_SIZE:20}
+      minimum-idle: 4
+      connection-timeout: ${IM_DB_CONNECT_TIMEOUT_MS:5000}
+      validation-timeout: 2000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        default_batch_fetch_size: 50
+        order_inserts: true
+        order_updates: true
+  flyway:
+    enabled: ${IM_FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
+  jackson:
+    time-zone: UTC
+    default-property-inclusion: non_null
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 50MB
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: im-service
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /docs
+    operations-sorter: method
+    tags-sorter: alpha
+
+im:
+  cors: ${IM_CORS:*}
+  encryption:
+    # 必须为 Base64 编码的 32 字节密钥，生产环境通过环境变量/密钥管理注入。
+    key: ${IM_ENCRYPTION_KEY:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
+  security:
+    enabled: ${IM_SECURITY_ENABLED:true}
+    admin-api-key: ${IM_ADMIN_API_KEY:dev-admin-key-change-me}
+    internal-token: ${IM_INTERNAL_TOKEN:dev-internal-token-change-me}
+    device-token-pepper: ${IM_DEVICE_TOKEN_PEPPER:dev-device-pepper-change-me}
+    admin-role: ${IM_ADMIN_ROLE:IM_ADMIN}
+    service-role: ${IM_SERVICE_ROLE:IM_SERVICE}
+    jwt:
+      hmac-secret: ${IM_JWT_HMAC_SECRET:}
+      jwks-url: ${IM_JWT_JWKS_URL:}
+      issuer: ${IM_JWT_ISSUER:}
+      audience: ${IM_JWT_AUDIENCE:}
+      roles-claim: ${IM_JWT_ROLES_CLAIM:roles}
+      tenant-claim: ${IM_JWT_TENANT_CLAIM:tenant_id}
+      clock-skew-seconds: ${IM_JWT_CLOCK_SKEW_SECONDS:30}
+  mqtt:
+    client-id-prefix: ${IM_MQTT_CLIENT_ID_PREFIX:im-service-publisher}
+    connect-timeout-seconds: ${IM_MQTT_CONNECT_TIMEOUT_SECONDS:10}
+    keep-alive-seconds: ${IM_MQTT_KEEP_ALIVE_SECONDS:60}
+    session-expiry-seconds: ${IM_MQTT_SESSION_EXPIRY_SECONDS:0}
+    max-inflight: ${IM_MQTT_MAX_INFLIGHT:100}
+    reconnect-delay-seconds: ${IM_MQTT_RECONNECT_DELAY_SECONDS:5}
+    publish-timeout-seconds: ${IM_MQTT_PUBLISH_TIMEOUT_SECONDS:10}
+    status-check-interval-ms: ${IM_MQTT_STATUS_CHECK_INTERVAL_MS:30000}
+    max-payload-bytes: ${IM_MQTT_MAX_PAYLOAD_BYTES:262144}
+    default-qos: ${IM_MQTT_DEFAULT_QOS:1}
+    service-topic-prefix: ${IM_MQTT_SERVICE_TOPIC_PREFIX:tenants/}
+  email:
+    worker-enabled: ${IM_EMAIL_WORKER_ENABLED:true}
+    poll-interval-ms: ${IM_EMAIL_POLL_INTERVAL_MS:2000}
+    batch-size: ${IM_EMAIL_BATCH_SIZE:20}
+    max-attempts: ${IM_EMAIL_MAX_ATTEMPTS:5}
+    retry-base-seconds: ${IM_EMAIL_RETRY_BASE_SECONDS:60}
+    retry-max-seconds: ${IM_EMAIL_RETRY_MAX_SECONDS:3600}
+    lock-timeout-seconds: ${IM_EMAIL_LOCK_TIMEOUT_SECONDS:900}
+    attachment-dir: ${IM_EMAIL_ATTACHMENT_DIR:./data/email-attachments}
+    max-attachment-bytes: ${IM_EMAIL_MAX_ATTACHMENT_BYTES:10485760}
+    max-total-attachment-bytes: ${IM_EMAIL_MAX_TOTAL_ATTACHMENT_BYTES:26214400}
+    allowed-attachment-extensions: ${IM_EMAIL_ALLOWED_ATTACHMENT_EXTENSIONS:pdf,doc,docx,xls,xlsx,ppt,pptx,txt,csv,json,xml,zip,gz,png,jpg,jpeg,gif,webp}
+    max-recipients: ${IM_EMAIL_MAX_RECIPIENTS:100}
+    rate-limit-enabled: ${IM_EMAIL_RATE_LIMIT_ENABLED:true}
+    worker-id: ${IM_EMAIL_WORKER_ID:}
+  grpc:
+    enabled: ${IM_GRPC_ENABLED:true}
+    port: ${IM_GRPC_PORT:9090}
+    auth-enabled: ${IM_GRPC_AUTH_ENABLED:true}
+    tls-enabled: ${IM_GRPC_TLS_ENABLED:false}
+    require-client-auth: ${IM_GRPC_REQUIRE_CLIENT_AUTH:false}
+    certificate-chain-path: ${IM_GRPC_CERT_CHAIN:}
+    private-key-path: ${IM_GRPC_PRIVATE_KEY:}
+    trust-certificate-path: ${IM_GRPC_TRUST_CERT:}
+    max-inbound-message-size: ${IM_GRPC_MAX_INBOUND_MESSAGE_SIZE:16777216}
+  seed:
+    enabled: ${IM_SEED_ENABLED:true}
+    broker-code: ${IM_SEED_BROKER_CODE:emqx-default}
+    broker-name: ${IM_SEED_BROKER_NAME:EMQX Default}
+    broker-host: ${IM_SEED_BROKER_HOST:localhost}
+    broker-tcp-port: ${IM_SEED_BROKER_TCP_PORT:1883}
+    broker-tls-port: ${IM_SEED_BROKER_TLS_PORT:8883}
+    broker-tls-enabled: ${IM_SEED_BROKER_TLS_ENABLED:false}
+    access-config-code: ${IM_SEED_ACCESS_CONFIG_CODE:default}
+    tenant-id: ${IM_SEED_TENANT_ID:}
+    service-topic-prefix: ${IM_SEED_SERVICE_TOPIC_PREFIX:tenants/}
+  rate-limit:
+    enabled: ${IM_RATE_LIMIT_ENABLED:true}
+    http-per-minute: ${IM_RATE_LIMIT_HTTP_PER_MINUTE:600}
+    grpc-per-minute: ${IM_RATE_LIMIT_GRPC_PER_MINUTE:6000}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] [tenant=%X{tenantId:-} actor=%X{actor:-}] %logger{40} - %msg%n"
+  level:
+    root: INFO
+    com.platform.im: INFO
+    org.hibernate.SQL: WARN

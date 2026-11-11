@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package platform.im.mqtt.v1;
+
+option java_package = "com.platform.im.grpc.proto.mqtt";
+option java_multiple_files = true;
+option java_outer_classname = "MqttMessageServiceProto";
+
+// 平台内部设备消息发布契约。字段编号一旦发布不得复用。
+service MqttMessageService {
+  // 向单个设备发送消息，topic 由服务端根据设备配置解析，调用方不可指定。
+  rpc PublishToDevice (PublishToDeviceRequest) returns (PublishResponse);
+
+  // 向多个设备批量发送消息。
+  rpc BatchPublishToDevices (BatchPublishToDevicesRequest) returns (BatchPublishResponse);
+
+  // 向已授权的业务 Topic 发送消息。
+  rpc PublishToTopic (PublishToTopicRequest) returns (PublishResponse);
+}
+
+message PublishToDeviceRequest {
+  string tenant_id = 1;
+  string device_id = 2;
+  string message_id = 3;
+  bytes payload = 4;
+  string content_type = 5;
+  int32 qos = 6;
+  bool retained = 7;
+  uint32 message_expiry_interval = 8;
+
+  reserved 20 to 29;
+  reserved "legacy_topic";
+}
+
+message PublishToTopicRequest {
+  string tenant_id = 1;
+  string topic = 2;
+  string message_id = 3;
+  bytes payload = 4;
+  string content_type = 5;
+  int32 qos = 6;
+  bool retained = 7;
+  uint32 message_expiry_interval = 8;
+
+  reserved 20 to 29;
+}
+
+message BatchPublishToDevicesRequest {
+  string tenant_id = 1;
+  repeated string device_ids = 2;
+  string message_id = 3;
+  bytes payload = 4;
+  string content_type = 5;
+  int32 qos = 6;
+  bool retained = 7;
+  uint32 message_expiry_interval = 8;
+}
+
+message PublishResult {
+  string device_id = 1;
+  string topic = 2;
+  bool success = 3;
+  string code = 4;
+  string message = 5;
+  string message_id = 6;
+  string record_id = 7;
+}
+
+message PublishResponse {
+  bool success = 1;
+  string code = 2;
+  string message = 3;
+  string record_id = 4;
+  string topic = 5;
+  string message_id = 6;
+}
+
+message BatchPublishResponse {
+  int32 total = 1;
+  int32 success_count = 2;
+  int32 failure_count = 3;
+  repeated PublishResult results = 4;
+}
